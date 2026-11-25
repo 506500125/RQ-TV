@@ -7,6 +7,12 @@ const appConfig = {
   site: 'https://sexbjcam.com',
   tabs: [
     {
+      name: '首页',
+      ext: {
+        id: '/',
+      },
+    },
+    {
       name: '最新',
       ext: {
         id: '/?filter=latest',
@@ -69,14 +75,17 @@ async function getConfig() {
 async function getCards(ext) {
   ext = argsify(ext)
   let cards = []
-  let { page = 1, id } = ext
+  let { page = 1, id = '/' } = ext
 
-  let url = appConfig.site + id
+  let basePath = id === '/' ? '' : id
+  let url = appConfig.site + basePath
   if (page > 1) {
-    if (id.includes('?')) {
-      url = appConfig.site + id + '&page=' + page
+    if (basePath.includes('?')) {
+      url = appConfig.site + basePath + '&page=' + page
+    } else if (basePath === '') {
+      url = appConfig.site + '/page/' + page + '/'
     } else {
-      url = appConfig.site + id + 'page/' + page + '/'
+      url = appConfig.site + (basePath.endsWith('/') ? basePath : basePath + '/') + 'page/' + page + '/'
     }
   }
 
@@ -84,11 +93,16 @@ async function getCards(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
     })
+
+    if (!data || typeof data !== 'string') {
+      $print('getCards 响应为空')
+      return jsonify({ list: [] })
+    }
 
     if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
       $print('被 Cloudflare 拦截了')
@@ -96,23 +110,43 @@ async function getCards(ext) {
     }
 
     const $ = cheerio.load(data)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+    let items = $('article, .thumb-block, .video-item, .videos-list > div, .loop-video')
 
+    const seen = new Set()
     items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') ||
-                 $(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') ||
-                 $(el).find('img').attr('data-main-thumb') || ''
-      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
+      const a = $(el).find('a[href]').first()
+      let href = fixLink(a.attr('href') || '', appConfig.site)
+      if (!href || href === appConfig.site + '/' || seen.has(href)) return
+
+      const img = $(el).find('img').first()
+      let title = (
+        a.attr('data-title') ||
+        a.attr('title') ||
+        img.attr('alt') ||
+        img.attr('title') ||
+        $(el).find('.title, .video-title, h2, h3').first().text() ||
+        ''
+      ).trim()
+
+      let cover = fixLink(
+        img.attr('data-src') ||
+        img.attr('data-original') ||
+        img.attr('data-lazy-src') ||
+        img.attr('data-main-thumb') ||
+        img.attr('src') ||
+        '',
+        appConfig.site
+      )
+
+      let duration = (
+        $(el).find('.duration, span.duration, .time, .length').first().text() || ''
+      ).trim()
 
       if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
+        seen.add(href)
         cards.push({
           vod_id: href,
-          vod_name: title.trim(),
+          vod_name: title,
           vod_pic: cover,
           vod_remarks: duration,
           ext: {
@@ -122,7 +156,7 @@ async function getCards(ext) {
       }
     })
 
-    $print('抓到视频数量: ' + cards.length)
+    $print('sexbjcam 抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
   }
@@ -141,7 +175,7 @@ async function getTracks(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
       },
     })
 
@@ -151,8 +185,7 @@ async function getTracks(ext) {
     $('iframe').each((_, el) => {
       let src = $(el).attr('src') || $(el).attr('data-src') || ''
       if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
-        if (!src.startsWith('http')) src = fixLink(src, url)
-        iframeSrc = src
+        iframeSrc = fixLink(src, url)
       }
     })
 
@@ -188,7 +221,7 @@ async function getTracks(ext) {
 async function getPlayinfo(ext) {
   ext = argsify(ext)
   let playUrl = ext.url
-  let referer = ext.referer || 'https://sexbjcam.com/'
+  let referer = ext.referer || (appConfig.site + '/')
   let realStream = ''
 
   try {
@@ -231,8 +264,8 @@ async function getPlayinfo(ext) {
     urls: realStream ? [realStream] : [],
     headers: [{
       'User-Agent': UA,
-      'Referer': 'https://sexbjcam.com/',
-      'Origin': 'https://sexbjcam.com',
+      'Referer': appConfig.site + '/',
+      'Origin': appConfig.site,
     }],
   })
 }
@@ -249,25 +282,48 @@ async function search(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
       },
     })
 
     const $ = cheerio.load(data)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+    let items = $('article, .thumb-block, .video-item, .videos-list > div, .loop-video')
 
+    const seen = new Set()
     items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
-      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      let duration = $(el).find('.duration').text().trim() || ''
+      const a = $(el).find('a[href]').first()
+      let href = fixLink(a.attr('href') || '', appConfig.site)
+      if (!href || href === appConfig.site + '/' || seen.has(href)) return
+
+      const img = $(el).find('img').first()
+      let title = (
+        a.attr('data-title') ||
+        a.attr('title') ||
+        img.attr('alt') ||
+        img.attr('title') ||
+        $(el).find('.title, .video-title, h2, h3').first().text() ||
+        ''
+      ).trim()
+
+      let cover = fixLink(
+        img.attr('data-src') ||
+        img.attr('data-original') ||
+        img.attr('data-lazy-src') ||
+        img.attr('data-main-thumb') ||
+        img.attr('src') ||
+        '',
+        appConfig.site
+      )
+
+      let duration = (
+        $(el).find('.duration, span.duration, .time, .length').first().text() || ''
+      ).trim()
 
       if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
+        seen.add(href)
         cards.push({
           vod_id: href,
-          vod_name: title.trim(),
+          vod_name: title,
           vod_pic: cover,
           vod_remarks: duration,
           ext: {
