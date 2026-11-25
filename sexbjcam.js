@@ -27,6 +27,36 @@ const appConfig = {
   ],
 }
 
+function fixLink(raw, base) {
+  let u = String(raw || '').trim()
+  if (!u) return ''
+  u = u.replace(/\\\//g, '/')
+  if (u.startsWith('http://') || u.startsWith('https://')) return u
+  if (u.startsWith('//')) return 'https:' + u
+  if (u.startsWith('/')) {
+    const m = String(base || appConfig.site).match(/^(https?:\/\/[^/]+)/i)
+    return (m ? m[1] : appConfig.site) + u
+  }
+  return appConfig.site + '/' + u.replace(/^\.?\//, '')
+}
+
+function extractM3u8(html) {
+  if (!html || typeof html !== 'string') return ''
+  const text = html.replace(/\\\//g, '/')
+  const regs = [
+    /(https?:\/\/[^"'\\\s<>]+?so279tk\.cc[^"'\\\s<>]*?master\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?\/video\/video\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
+  ]
+  for (const r of regs) {
+    const hit = text.match(r)
+    if (hit && hit[1]) return hit[1]
+  }
+  return ''
+}
+
 async function getConfig() {
   return jsonify(appConfig)
 }
@@ -70,7 +100,7 @@ async function getCards(ext) {
       let cover = $(el).find('img.video-main-thumb').attr('src') ||
                  $(el).find('img').attr('src') ||
                  $(el).find('img').attr('data-src') ||
-                 $(el).attr('data-main-thumb') || ''
+                 $(el).find('img').attr('data-main-thumb') || ''
       let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
@@ -88,7 +118,6 @@ async function getCards(ext) {
     })
 
     $print('抓到视频数量: ' + cards.length)
-
   } catch (e) {
     $print('getCards 错误: ' + e)
   }
@@ -111,25 +140,43 @@ async function getTracks(ext) {
       },
     })
 
-    const $ = cheerio.load(data)
-
-    let iframeSrc = ''
-    $('iframe').each((_, el) => {
-      let src = $(el).attr('src') || ''
-      if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
-        if (!src.startsWith('http')) src = 'https:' + src
-        iframeSrc = src
-      }
-    })
-
-    if (iframeSrc) {
+    const directStream = extractM3u8(data)
+    if (directStream) {
       tracks.push({
         name: '播放',
         pan: '',
         ext: {
-          url: iframeSrc,
+          url: directStream,
+          referer: 'https://sexbjcam.com/',
+          isDirect: true,
         },
       })
+    } else {
+      const $ = cheerio.load(data)
+      let iframes = []
+
+      $('iframe').each((_, el) => {
+        const src = fixLink($(el).attr('src') || $(el).attr('data-src') || '', url)
+        if (src) iframes.push(src)
+      })
+
+      $print('找到 iframe: ' + JSON.stringify(iframes))
+
+      let iframeSrc = iframes.find(src =>
+        /playerrecord|recordplay|\/e\/|embed|player|so279tk/i.test(src)
+      ) || iframes[0] || ''
+
+      if (iframeSrc) {
+        tracks.push({
+          name: '播放',
+          pan: '',
+          ext: {
+            url: iframeSrc,
+            referer: url,
+            isDirect: false,
+          },
+        })
+      }
     }
   } catch (e) {
     $print('getTracks 错误: ' + e)
@@ -148,34 +195,43 @@ async function getTracks(ext) {
 async function getPlayinfo(ext) {
   ext = argsify(ext)
   let playUrl = ext.url
+  let referer = ext.referer || 'https://sexbjcam.com/'
 
   try {
-    const { data } = await $fetch.get(playUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
-      },
-    })
+    if (!ext.isDirect && playUrl) {
+      const { data } = await $fetch.get(playUrl, {
+        headers: {
+          'User-Agent': UA,
+          'Referer': referer,
+        },
+      })
 
-    // 优先匹配 master.m3u8
-    let match = data.match(/(https?:\/\/[^"'\\s]+?master\.m3u8[^"'\\s]*)/i)
-    if (!match) {
-      // 再匹配 video/video.m3u8
-      match = data.match(/(https?:\/\/[^"'\\s]+?\/video\/video\.m3u8[^"'\\s]*)/i)
-    }
-    if (!match) {
-      // 普通 m3u8
-      match = data.match(/(https?:\/\/[^"'\\s]+?\.m3u8[^"'\\s]*)/i)
-    }
-    if (!match) {
-      match = data.match(/["'](https?:\/\/[^"']+?\.m3u8[^"']*)["']/i)
-    }
+      let found = extractM3u8(data)
 
-    if (match && match[1]) {
-      playUrl = match[1]
-      $print('解析到播放地址: ' + playUrl)
-    } else {
-      $print('未能解析出 m3u8，返回原地址')
+      // 若第一层页面里还有一层 iframe，再往下查一次
+      if (!found && typeof data === 'string') {
+        const $ = cheerio.load(data)
+        const subRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+        const subUrl = fixLink(subRaw, playUrl)
+        if (subUrl && subUrl !== playUrl) {
+          $print('检查二层 iframe: ' + subUrl)
+          const subRes = await $fetch.get(subUrl, {
+            headers: {
+              'User-Agent': UA,
+              'Referer': playUrl,
+            },
+          })
+          playUrl = subUrl
+          found = extractM3u8(subRes.data)
+        }
+      }
+
+      if (found) {
+        playUrl = found
+        $print('解析到播放地址: ' + playUrl)
+      } else {
+        $print('未能解析出 m3u8，当前返回地址: ' + playUrl)
+      }
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
