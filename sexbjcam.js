@@ -55,24 +55,21 @@ async function getCards(ext) {
       },
     })
 
-    // 如果被 Cloudflare 拦截
     if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
       $print('被 Cloudflare 拦截了')
       return jsonify({ list: [] })
     }
 
     const $ = cheerio.load(data)
-
-    // 多种选择器兼容
     let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
 
     items.each((_, el) => {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') || 
-                 $(el).find('img').attr('src') || 
-                 $(el).find('img').attr('data-src') || 
+      let cover = $(el).find('img.video-main-thumb').attr('src') ||
+                 $(el).find('img').attr('src') ||
+                 $(el).find('img').attr('data-src') ||
                  $(el).attr('data-main-thumb') || ''
       let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
@@ -116,19 +113,24 @@ async function getTracks(ext) {
 
     const $ = cheerio.load(data)
 
+    let iframeSrc = ''
     $('iframe').each((_, el) => {
       let src = $(el).attr('src') || ''
       if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
         if (!src.startsWith('http')) src = 'https:' + src
-        tracks.push({
-          name: '播放',
-          pan: '',
-          ext: {
-            url: src,
-          },
-        })
+        iframeSrc = src
       }
     })
+
+    if (iframeSrc) {
+      tracks.push({
+        name: '播放',
+        pan: '',
+        ext: {
+          url: iframeSrc,
+        },
+      })
+    }
   } catch (e) {
     $print('getTracks 错误: ' + e)
   }
@@ -145,11 +147,36 @@ async function getTracks(ext) {
 
 async function getPlayinfo(ext) {
   ext = argsify(ext)
+  let playUrl = ext.url
+
+  try {
+    const { data } = await $fetch.get(playUrl, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': 'https://sexbjcam.com/',
+      },
+    })
+
+    // 尝试匹配 m3u8
+    let m3u8Match = data.match(/(https?:\/\/[^"'\\s]+\.m3u8[^"'\\s]*)/i)
+    if (m3u8Match && m3u8Match[1]) {
+      playUrl = m3u8Match[1]
+      $print('找到 m3u8: ' + playUrl)
+    } else {
+      m3u8Match = data.match(/["'](https?:\/\/[^"']+?\.m3u8[^"']*)["']/i)
+      if (m3u8Match && m3u8Match[1]) {
+        playUrl = m3u8Match[1]
+      }
+    }
+  } catch (e) {
+    $print('getPlayinfo 解析错误: ' + e)
+  }
+
   return jsonify({
-    urls: [ext.url],
+    urls: [playUrl],
     headers: [{
       'User-Agent': UA,
-      'Referer': 'https://sexbjcam.com/',
+      'Referer': playUrl.includes('playerrecord') ? playUrl : 'https://sexbjcam.com/',
     }],
   })
 }
