@@ -1,6 +1,5 @@
-// sexbjcam.js
 const cheerio = createCheerio()
-const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1'
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
   ver: 1,
@@ -40,9 +39,9 @@ async function getCards(ext) {
   let url = appConfig.site + id
   if (page > 1) {
     if (id.includes('?')) {
-      url = `${appConfig.site}${id}&page=${page}`
+      url = appConfig.site + id + '&page=' + page
     } else {
-      url = `${appConfig.site}${id}page/${page}/`
+      url = appConfig.site + id + 'page/' + page + '/'
     }
   }
 
@@ -50,23 +49,38 @@ async function getCards(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': appConfig.site + '/',
+        'Referer': 'https://sexbjcam.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
     })
 
+    // 如果被 Cloudflare 拦截
+    if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
+      $print('被 Cloudflare 拦截了')
+      return jsonify({ list: [] })
+    }
+
     const $ = cheerio.load(data)
 
-    $('article.loop-video.thumb-block').each((_, el) => {
+    // 多种选择器兼容
+    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+
+    items.each((_, el) => {
       const a = $(el).find('a').first()
-      const href = a.attr('href')
-      const title = a.attr('data-title') || $(el).find('img.video-main-thumb').attr('alt') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') || $(el).attr('data-main-thumb') || ''
-      const duration = $(el).find('span.duration').text().trim()
+      let href = a.attr('href') || ''
+      let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
+      let cover = $(el).find('img.video-main-thumb').attr('src') || 
+                 $(el).find('img').attr('src') || 
+                 $(el).find('img').attr('data-src') || 
+                 $(el).attr('data-main-thumb') || ''
+      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
+        if (!href.startsWith('http')) href = appConfig.site + href
         cards.push({
           vod_id: href,
-          vod_name: title,
+          vod_name: title.trim(),
           vod_pic: cover,
           vod_remarks: duration,
           ext: {
@@ -75,8 +89,11 @@ async function getCards(ext) {
         })
       }
     })
+
+    $print('抓到视频数量: ' + cards.length)
+
   } catch (e) {
-    $print('getCards error: ' + e)
+    $print('getCards 错误: ' + e)
   }
 
   return jsonify({
@@ -93,35 +110,27 @@ async function getTracks(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': appConfig.site + '/',
+        'Referer': 'https://sexbjcam.com/',
       },
     })
 
     const $ = cheerio.load(data)
 
-    // 提取 playerrecord 的 iframe
-    let iframeSrc = ''
     $('iframe').each((_, el) => {
-      const src = $(el).attr('src') || ''
-      if (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/')) {
-        iframeSrc = src
+      let src = $(el).attr('src') || ''
+      if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
+        if (!src.startsWith('http')) src = 'https:' + src
+        tracks.push({
+          name: '播放',
+          pan: '',
+          ext: {
+            url: src,
+          },
+        })
       }
     })
-
-    if (iframeSrc) {
-      if (!iframeSrc.startsWith('http')) {
-        iframeSrc = 'https:' + iframeSrc
-      }
-      tracks.push({
-        name: '播放',
-        pan: '',
-        ext: {
-          url: iframeSrc,
-        },
-      })
-    }
   } catch (e) {
-    $print('getTracks error: ' + e)
+    $print('getTracks 错误: ' + e)
   }
 
   return jsonify({
@@ -136,15 +145,11 @@ async function getTracks(ext) {
 
 async function getPlayinfo(ext) {
   ext = argsify(ext)
-  const url = ext.url
-
-  // 目前直接返回 embed 地址
-  // 注意：XPTV 不一定能直接播放第三方 embed 页面，可能需要进一步解析 m3u8
   return jsonify({
-    urls: [url],
+    urls: [ext.url],
     headers: [{
       'User-Agent': UA,
-      'Referer': appConfig.site,
+      'Referer': 'https://sexbjcam.com/',
     }],
   })
 }
@@ -153,33 +158,33 @@ async function search(ext) {
   ext = argsify(ext)
   let cards = []
   const text = ext.text || ''
-  const page = ext.page || 1
-
   if (!text) return jsonify({ list: cards })
 
-  const url = `${appConfig.site}/?s=${encodeURIComponent(text)}`
+  const url = appConfig.site + '/?s=' + encodeURIComponent(text)
 
   try {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': appConfig.site + '/',
+        'Referer': 'https://sexbjcam.com/',
       },
     })
 
     const $ = cheerio.load(data)
+    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
 
-    $('article.loop-video.thumb-block').each((_, el) => {
+    items.each((_, el) => {
       const a = $(el).find('a').first()
-      const href = a.attr('href')
-      const title = a.attr('data-title') || $(el).find('img.video-main-thumb').attr('alt') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') || $(el).attr('data-main-thumb') || ''
-      const duration = $(el).find('span.duration').text().trim()
+      let href = a.attr('href') || ''
+      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
+      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+      let duration = $(el).find('.duration').text().trim() || ''
 
       if (href && title) {
+        if (!href.startsWith('http')) href = appConfig.site + href
         cards.push({
           vod_id: href,
-          vod_name: title,
+          vod_name: title.trim(),
           vod_pic: cover,
           vod_remarks: duration,
           ext: {
@@ -189,7 +194,7 @@ async function search(ext) {
       }
     })
   } catch (e) {
-    $print('search error: ' + e)
+    $print('search 错误: ' + e)
   }
 
   return jsonify({
