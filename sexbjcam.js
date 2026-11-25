@@ -6,24 +6,9 @@ const appConfig = {
   title: 'SexBJCam',
   site: 'https://sexbjcam.com',
   tabs: [
-    {
-      name: '最新',
-      ext: {
-        id: '/?filter=latest',
-      },
-    },
-    {
-      name: 'KOREAN BJ',
-      ext: {
-        id: '/category/korean-bj/',
-      },
-    },
-    {
-      name: 'CHINESE GIRL',
-      ext: {
-        id: '/category/chinese-girl/',
-      },
-    },
+    { name: '最新', ext: { id: '/?filter=latest' } },
+    { name: 'KOREAN BJ', ext: { id: '/category/korean-bj/' } },
+    { name: 'CHINESE GIRL', ext: { id: '/category/chinese-girl/' } },
   ],
 }
 
@@ -31,17 +16,26 @@ async function getConfig() {
   return jsonify(appConfig)
 }
 
+function normalizeUrl(rawUrl, baseUrl) {
+  if (!rawUrl) return ''
+  let u = String(rawUrl).trim()
+  if (u.startsWith('http://') || u.startsWith('https://')) return u
+  if (u.startsWith('//')) return 'https:' + u
+  const base = (baseUrl || appConfig.site).replace(/\/+$/, '')
+  return u.startsWith('/') ? base + u : base + '/' + u
+}
+
 async function getCards(ext) {
   ext = argsify(ext)
   let cards = []
   let { page = 1, id } = ext
-
   let url = appConfig.site + id
+
   if (page > 1) {
     if (id.includes('?')) {
       url = appConfig.site + id + '&page=' + page
     } else {
-      url = appConfig.site + id + 'page/' + page + '/'
+      url = appConfig.site + id.replace(/\/?$/, '/') + 'page/' + page + '/'
     }
   }
 
@@ -49,52 +43,51 @@ async function getCards(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
     })
 
-    if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
+    const html = typeof data === 'string' ? data : JSON.stringify(data || '')
+    if (html.includes('Just a moment') || html.includes('cf-browser-verification') || html.includes('Checking your browser')) {
       $print('被 Cloudflare 拦截了')
       return jsonify({ list: [] })
     }
 
-    const $ = cheerio.load(data)
+    const $ = cheerio.load(html)
     let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
 
     items.each((_, el) => {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') ||
-                 $(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') ||
-                 $(el).find('img').attr('data-main-thumb') || ''
+      let cover =
+        $(el).find('img.video-main-thumb').attr('src') ||
+        $(el).find('img').attr('src') ||
+        $(el).find('img').attr('data-src') ||
+        $(el).find('img').attr('data-main-thumb') ||
+        ''
       let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
+        href = normalizeUrl(href, appConfig.site)
+        cover = normalizeUrl(cover, appConfig.site)
         cards.push({
           vod_id: href,
           vod_name: title.trim(),
           vod_pic: cover,
           vod_remarks: duration,
-          ext: {
-            url: href,
-          },
+          ext: { url: href },
         })
       }
     })
-
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
   }
 
-  return jsonify({
-    list: cards,
-  })
+  return jsonify({ list: cards })
 }
 
 async function getTracks(ext) {
@@ -106,41 +99,54 @@ async function getTracks(ext) {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
       },
     })
 
-    const $ = cheerio.load(data)
-
+    const html = typeof data === 'string' ? data : JSON.stringify(data || '')
+    const $ = cheerio.load(html)
     let iframeSrc = ''
+
     $('iframe').each((_, el) => {
       let src = $(el).attr('src') || $(el).attr('data-src') || ''
       if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
-        if (!src.startsWith('http')) src = src.startsWith('//') ? 'https:' + src : appConfig.site + src
-        iframeSrc = src
+        iframeSrc = normalizeUrl(src, url)
       }
     })
 
     if (!iframeSrc) {
       let firstSrc = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
       if (firstSrc) {
-        if (!firstSrc.startsWith('http')) firstSrc = firstSrc.startsWith('//') ? 'https:' + firstSrc : appConfig.site + firstSrc
-        iframeSrc = firstSrc
+        iframeSrc = normalizeUrl(firstSrc, url)
       }
     }
 
     if (iframeSrc) {
       tracks.push({
-        name: '播放',
+        name: '播放 (Iframe已提取)',
         pan: '',
         ext: {
           url: iframeSrc,
           referer: url,
         },
       })
+    } else {
+      // 兜底：若无 iframe，尝试直接用详情页本身去抓 m3u8
+      tracks.push({
+        name: '直连尝试 (未见Iframe)',
+        pan: '',
+        ext: {
+          url: url,
+          referer: appConfig.site + '/',
+        },
+      })
     }
   } catch (e) {
-    $print('getTracks 错误: ' + e)
+    tracks.push({
+      name: 'getTracks异常: ' + String(e).slice(0, 30),
+      pan: '',
+      ext: { url: url, referer: appConfig.site + '/' },
+    })
   }
 
   return jsonify({
@@ -155,11 +161,13 @@ async function getTracks(ext) {
 
 async function getPlayinfo(ext) {
   ext = argsify(ext)
-  let playUrl = ext.url
-  let referer = ext.referer || 'https://sexbjcam.com/'
+  let targetUrl = ext.url
+  let referer = ext.referer || (appConfig.site + '/')
+  let finalUrl = targetUrl
+  let effectiveReferer = referer
 
   try {
-    const res = await $fetch.get(playUrl, {
+    const res = await $fetch.get(targetUrl, {
       headers: {
         'User-Agent': UA,
         'Referer': referer,
@@ -167,36 +175,76 @@ async function getPlayinfo(ext) {
     })
 
     let rawText = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '')
-    let cleanText = rawText.replace(/\\\//g, '/')
+    // 兼容转义斜杠、Unicode 斜杠以及协议相对路径
+    let cleanText = rawText.replace(/\\\//g, '/').replace(/\\u002F/gi, '/')
 
-    let allM3u8 = cleanText.match(/https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi) || []
-    allM3u8 = [...new Set(allM3u8)]
+    let allM3u8 = cleanText.match(/(?:https?:)?\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi) || []
+    allM3u8 = [...new Set(allM3u8)].map((u) => {
+      let cleaned = u.replace(/['")\]}>]+$/, '')
+      return cleaned.startsWith('//') ? 'https:' + cleaned : cleaned
+    })
 
-    let filtered = allM3u8.filter(u => !/(ad|preroll|midroll|postroll|promo|sponsor|vast)/i.test(u))
+    let filtered = allM3u8.filter((u) => !/(ad|preroll|midroll|postroll|promo|sponsor|vast)/i.test(u))
+
     let picked =
-      filtered.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
-      filtered.find(u => /master\.m3u8/i.test(u)) ||
-      filtered.find(u => /\/video\/video\.m3u8/i.test(u)) ||
+      filtered.find((u) => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
+      filtered.find((u) => /master\.m3u8/i.test(u)) ||
+      filtered.find((u) => /\/video\/video\.m3u8/i.test(u)) ||
       filtered[0] ||
+      allM3u8[0] ||
       ''
 
     if (picked) {
-      playUrl = picked
-      $print('解析到播放地址: ' + playUrl)
+      finalUrl = picked
+      // 切片与播放清单通常校验播放器页面（即 targetUrl）作为 Referer
+      effectiveReferer = targetUrl
     } else {
-      $print('未能解析出正片 m3u8，返回原地址')
+      // 如果没直接拿到 m3u8，看看 iframe 内部是否还嵌套了第二层 iframe
+      const nestedMatch = cleanText.match(/<iframe[^>]+(?:src|data-src)=["']([^"']+)["']/i)
+      if (nestedMatch && nestedMatch[1]) {
+        const nestedUrl = normalizeUrl(nestedMatch[1], targetUrl)
+        const subRes = await $fetch.get(nestedUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Referer': targetUrl,
+          },
+        })
+        const subRaw = typeof subRes.data === 'string' ? subRes.data : JSON.stringify(subRes.data || '')
+        const subClean = subRaw.replace(/\\\//g, '/').replace(/\\u002F/gi, '/')
+        let subM3u8 = subClean.match(/(?:https?:)?\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi) || []
+        subM3u8 = [...new Set(subM3u8)].map((u) => {
+          let cleaned = u.replace(/['")\]}>]+$/, '')
+          return cleaned.startsWith('//') ? 'https:' + cleaned : cleaned
+        })
+        const subFiltered = subM3u8.filter((u) => !/(ad|preroll|midroll|postroll|promo|sponsor|vast)/i.test(u))
+        const subPicked = subFiltered[0] || subM3u8[0] || ''
+        if (subPicked) {
+          finalUrl = subPicked
+          effectiveReferer = nestedUrl
+        }
+      }
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
   }
 
+  let origin = ''
+  try {
+    const m = effectiveReferer.match(/^(https?:\/\/[^/]+)/i)
+    if (m) origin = m[1]
+  } catch (_) {}
+
+  const headerObj = {
+    'User-Agent': UA,
+    'Referer': effectiveReferer,
+  }
+  if (origin) {
+    headerObj['Origin'] = origin
+  }
+
   return jsonify({
-    urls: [playUrl],
-    headers: [{
-      'User-Agent': UA,
-      'Referer': 'https://sexbjcam.com/',
-      'Origin': 'https://sexbjcam.com',
-    }],
+    urls: [finalUrl],
+    headers: [headerObj],
   })
 }
 
@@ -207,16 +255,16 @@ async function search(ext) {
   if (!text) return jsonify({ list: cards })
 
   const url = appConfig.site + '/?s=' + encodeURIComponent(text)
-
   try {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
+        'Referer': appConfig.site + '/',
       },
     })
 
-    const $ = cheerio.load(data)
+    const html = typeof data === 'string' ? data : JSON.stringify(data || '')
+    const $ = cheerio.load(html)
     let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
 
     items.each((_, el) => {
@@ -227,15 +275,12 @@ async function search(ext) {
       let duration = $(el).find('.duration').text().trim() || ''
 
       if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
         cards.push({
-          vod_id: href,
+          vod_id: normalizeUrl(href, appConfig.site),
           vod_name: title.trim(),
-          vod_pic: cover,
+          vod_pic: normalizeUrl(cover, appConfig.site),
           vod_remarks: duration,
-          ext: {
-            url: href,
-          },
+          ext: { url: normalizeUrl(href, appConfig.site) },
         })
       }
     })
@@ -243,7 +288,5 @@ async function search(ext) {
     $print('search 错误: ' + e)
   }
 
-  return jsonify({
-    list: cards,
-  })
+  return jsonify({ list: cards })
 }
