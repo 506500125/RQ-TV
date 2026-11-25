@@ -40,25 +40,24 @@ function fixLink(raw, base) {
   return appConfig.site + '/' + u.replace(/^\.?\//, '')
 }
 
-function pickBestStream(html) {
+function findRealStream(html) {
   if (!html || typeof html !== 'string') return ''
   const text = html.replace(/\\\//g, '/')
+  const matches = text.match(/https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi) || []
+  const unique = [...new Set(matches)]
 
-  const allMatches = text.match(/https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi) || []
-  const uniqueList = [...new Set(allMatches)]
-
-  if (uniqueList.length > 0) {
-    $print('匹配到的全部流地址: ' + JSON.stringify(uniqueList))
+  if (unique.length > 0) {
+    $print('抓到的流地址: ' + JSON.stringify(unique))
   }
 
-  const candidates = uniqueList.filter(u =>
+  const noAd = unique.filter(u =>
     !/(\/ads?\/|preroll|midroll|postroll|commercial|promo|sponsor|vast|ima)/i.test(u)
   )
 
   return (
-    candidates.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
-    candidates.find(u => /so279tk\.cc/i.test(u)) ||
-    candidates.find(u => /master\.m3u8/i.test(u)) ||
+    noAd.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
+    noAd.find(u => /so279tk\.cc/i.test(u)) ||
+    noAd.find(u => /master\.m3u8/i.test(u)) ||
     ''
   )
 }
@@ -103,9 +102,11 @@ async function getCards(ext) {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') \vert{}\vert{}$(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') \vert{}\vert{}$(el).find('img').attr('data-main-thumb') || ''
-      let duration = $(el).find('.duration').text().trim() \vert{}\vert{}$(el).find('span.duration').text().trim() || ''
+      let cover = $(el).find('img.video-main-thumb').attr('src') ||
+                 $(el).find('img').attr('src') ||
+                 $(el).find('img').attr('data-src') ||
+                 $(el).find('img').attr('data-main-thumb') || ''
+      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
         if (!href.startsWith('http')) href = appConfig.site + href
@@ -144,43 +145,31 @@ async function getTracks(ext) {
       },
     })
 
-    const directStream = pickBestStream(data)
-    if (directStream) {
+    const $ = cheerio.load(data)
+
+    let iframeSrc = ''
+    $('iframe').each((_, el) => {
+      let src = $(el).attr('src') || $(el).attr('data-src') || ''
+      if (src && (src.includes('playerrecord') || src.includes('recordplay') || src.includes('/e/'))) {
+        if (!src.startsWith('http')) src = fixLink(src, url)
+        iframeSrc = src
+      }
+    })
+
+    if (!iframeSrc) {
+      const firstIframe = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+      if (firstIframe) iframeSrc = fixLink(firstIframe, url)
+    }
+
+    if (iframeSrc) {
       tracks.push({
         name: '播放',
         pan: '',
         ext: {
-          url: directStream,
-          referer: 'https://sexbjcam.com/',
-          isDirect: true,
+          url: iframeSrc,
+          referer: url,
         },
       })
-    } else {
-      const $ = cheerio.load(data)
-      let iframes = []
-
-      $('iframe').each((_, el) => {
-        const src = fixLink($(el).attr('src') \vert{}\vert{}$(el).attr('data-src') || '', url)
-        if (src) iframes.push(src)
-      })
-
-      $print('找到 iframe: ' + JSON.stringify(iframes))
-
-      let iframeSrc = iframes.find(src =>
-        /playerrecord|recordplay|\/e\/|embed|player|so279tk/i.test(src)
-      ) || iframes[0] || ''
-
-      if (iframeSrc) {
-        tracks.push({
-          name: '播放',
-          pan: '',
-          ext: {
-            url: iframeSrc,
-            referer: url,
-            isDirect: false,
-          },
-        })
-      }
     }
   } catch (e) {
     $print('getTracks 错误: ' + e)
@@ -200,12 +189,10 @@ async function getPlayinfo(ext) {
   ext = argsify(ext)
   let playUrl = ext.url
   let referer = ext.referer || 'https://sexbjcam.com/'
-  let finalMediaUrl = ''
+  let realStream = ''
 
   try {
-    if (/\.(m3u8|mp4)(\?|$)/i.test(playUrl)) {
-      finalMediaUrl = playUrl
-    } else if (playUrl) {
+    if (playUrl) {
       const { data } = await $fetch.get(playUrl, {
         headers: {
           'User-Agent': UA,
@@ -213,9 +200,87 @@ async function getPlayinfo(ext) {
         },
       })
 
-      let found = pickBestStream(data)
+      realStream = findRealStream(data)
 
-      if (!found && typeof data === 'string') {
+      if (!realStream && typeof data === 'string') {
         const $ = cheerio.load(data)
-        const subRaw = $('iframe').first().attr('src') \vert{}\vert{}$('iframe').first().attr('data-src') || ''
-        const subUrl = fixLink(subRaw
+        const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+        const nextUrl = fixLink(nextRaw, playUrl)
+        if (nextUrl && nextUrl !== playUrl) {
+          const subRes = await $fetch.get(nextUrl, {
+            headers: {
+              'User-Agent': UA,
+              'Referer': playUrl,
+            },
+          })
+          realStream = findRealStream(subRes.data)
+        }
+      }
+    }
+
+    if (realStream) {
+      $print('解析到正片播放地址: ' + realStream)
+    } else {
+      $print('静态源码里未找到正片 m3u8/mp4，返回空链接避免误播广告')
+    }
+  } catch (e) {
+    $print('getPlayinfo 错误: ' + e)
+  }
+
+  return jsonify({
+    urls: realStream ? [realStream] : [],
+    headers: [{
+      'User-Agent': UA,
+      'Referer': 'https://sexbjcam.com/',
+      'Origin': 'https://sexbjcam.com',
+    }],
+  })
+}
+
+async function search(ext) {
+  ext = argsify(ext)
+  let cards = []
+  const text = ext.text || ''
+  if (!text) return jsonify({ list: cards })
+
+  const url = appConfig.site + '/?s=' + encodeURIComponent(text)
+
+  try {
+    const { data } = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': 'https://sexbjcam.com/',
+      },
+    })
+
+    const $ = cheerio.load(data)
+    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+
+    items.each((_, el) => {
+      const a = $(el).find('a').first()
+      let href = a.attr('href') || ''
+      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
+      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+      let duration = $(el).find('.duration').text().trim() || ''
+
+      if (href && title) {
+        if (!href.startsWith('http')) href = appConfig.site + href
+        cards.push({
+          vod_id: href,
+          vod_name: title.trim(),
+          vod_pic: cover,
+          vod_remarks: duration,
+          ext: {
+            url: href,
+          },
+        })
+      }
+    })
+  } catch (e) {
+    $print('search 错误: ' + e)
+  }
+
+  return jsonify({
+    list: cards,
+  })
+}
