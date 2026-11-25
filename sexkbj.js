@@ -55,9 +55,8 @@ function extractStreamUrl(text) {
   const cleaned = text.replace(/\\\//g, '/')
 
   const patterns = [
-    /(https?:\/\/[^"'\\\s<>]+?sexkbj\.top[^"'\\\s<>]*?\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
   ]
@@ -154,7 +153,6 @@ async function getTracks(ext) {
       },
     })
 
-    // 1. 先看看详情页源码里是否已经直接带了 m3u8 / mp4
     const directStream = extractStreamUrl(data)
     if (directStream) {
       tracks.push({
@@ -167,7 +165,6 @@ async function getTracks(ext) {
         },
       })
     } else {
-      // 2. 否则抓取详情页里的 iframe / source / video 地址
       const $ = cheerio.load(data)
       let candidates = []
 
@@ -224,7 +221,6 @@ async function getPlayinfo(ext) {
 
       let stream = extractStreamUrl(data)
 
-      // 如果第一层页面里还有内层 iframe，再追查一层
       if (!stream && typeof data === 'string') {
         const $ = cheerio.load(data)
         const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
