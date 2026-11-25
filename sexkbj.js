@@ -50,13 +50,19 @@ function normalizeUrl(rawUrl, baseUrl) {
   return appConfig.site + '/' + u.replace(/^\.?\//, '')
 }
 
+function isDirectMediaUrl(u) {
+  if (!u || typeof u !== 'string') return false
+  return /\.(m3u8|mp4)(\?|$)/i.test(u)
+}
+
 function extractStreamUrl(text) {
   if (!text || typeof text !== 'string') return ''
   const cleaned = text.replace(/\\\//g, '/')
 
   const patterns = [
-    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?sexkbj\.top[^"'\\\s<>]*?\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
   ]
@@ -161,7 +167,6 @@ async function getTracks(ext) {
         ext: {
           url: directStream,
           referer: 'https://sexkbj.com/',
-          direct: true,
         },
       })
     } else {
@@ -178,16 +183,14 @@ async function getTracks(ext) {
         if (src) candidates.push(src)
       })
 
-      $print('详情页候选播放地址: ' + JSON.stringify(candidates))
+      $print('详情页候选地址: ' + JSON.stringify(candidates))
 
-      const target = candidates[0] || url
       tracks.push({
         name: '播放',
         pan: '',
         ext: {
-          url: target,
+          url: candidates[0] || url,
           referer: url,
-          direct: false,
         },
       })
     }
@@ -207,50 +210,51 @@ async function getTracks(ext) {
 
 async function getPlayinfo(ext) {
   ext = argsify(ext)
-  let playUrl = ext.url
+  let targetUrl = ext.url
   let referer = ext.referer || 'https://sexkbj.com/'
+  let finalMediaUrl = ''
 
   try {
-    if (!ext.direct && playUrl) {
-      const { data } = await $fetch.get(playUrl, {
+    if (isDirectMediaUrl(targetUrl)) {
+      finalMediaUrl = targetUrl
+    } else if (targetUrl) {
+      const { data } = await $fetch.get(targetUrl, {
         headers: {
           'User-Agent': UA,
           'Referer': referer,
         },
       })
 
-      let stream = extractStreamUrl(data)
+      finalMediaUrl = extractStreamUrl(data)
 
-      if (!stream && typeof data === 'string') {
+      if (!finalMediaUrl && typeof data === 'string') {
         const $ = cheerio.load(data)
         const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
-        const nextUrl = normalizeUrl(nextRaw, playUrl)
-        if (nextUrl && nextUrl !== playUrl) {
-          $print('继续追踪内层 iframe: ' + nextUrl)
+        const nextUrl = normalizeUrl(nextRaw, targetUrl)
+        if (nextUrl && nextUrl !== targetUrl) {
+          $print('检查内层 iframe: ' + nextUrl)
           const subRes = await $fetch.get(nextUrl, {
             headers: {
               'User-Agent': UA,
-              'Referer': playUrl,
+              'Referer': targetUrl,
             },
           })
-          playUrl = nextUrl
-          stream = extractStreamUrl(subRes.data)
+          finalMediaUrl = extractStreamUrl(subRes.data)
         }
       }
+    }
 
-      if (stream) {
-        playUrl = stream
-        $print('成功提取 m3u8/mp4: ' + playUrl)
-      } else {
-        $print('未能提取到 m3u8/mp4，当前地址: ' + playUrl)
-      }
+    if (finalMediaUrl) {
+      $print('提取到直链: ' + finalMediaUrl)
+    } else {
+      $print('未能从静态响应中提取到动态 m3u8/mp4 直链（该站流地址由前端播放器脚本动态生成）')
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
   }
 
   return jsonify({
-    urls: [playUrl],
+    urls: finalMediaUrl ? [finalMediaUrl] : [],
     headers: [{
       'User-Agent': UA,
       'Referer': 'https://sexkbj.com/',
