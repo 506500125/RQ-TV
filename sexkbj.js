@@ -33,9 +33,10 @@ const appConfig = {
   ],
 }
 
-function fixUrl(rawUrl, baseUrl) {
+function normalizeUrl(rawUrl, baseUrl) {
   let u = String(rawUrl || '').trim()
   if (!u) return ''
+  u = u.replace(/\\\//g, '/')
   if (u.startsWith('http://') || u.startsWith('https://')) {
     return u
   }
@@ -49,18 +50,23 @@ function fixUrl(rawUrl, baseUrl) {
   return appConfig.site + '/' + u.replace(/^\.?\//, '')
 }
 
-function findMedia(text) {
+function extractStreamUrl(text) {
   if (!text || typeof text !== 'string') return ''
-  const s = text.replace(/\\\//g, '/')
-  const regs = [
+  const cleaned = text.replace(/\\\//g, '/')
+
+  const patterns = [
+    /(https?:\/\/[^"'\\\s<>]+?sexkbj\.top[^"'\\\s<>]*?\.m3u8[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\/video\/video\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
   ]
-  for (const r of regs) {
-    const hit = s.match(r)
-    if (hit && hit[1]) return hit[1]
+
+  for (const reg of patterns) {
+    const m = cleaned.match(reg)
+    if (m && m[1]) {
+      return m[1]
+    }
   }
   return ''
 }
@@ -148,38 +154,43 @@ async function getTracks(ext) {
       },
     })
 
-    const $ = cheerio.load(data)
-    let iframes = []
-
-    $('iframe').each((_, el) => {
-      let src = $(el).attr('src') || $(el).attr('data-src') || ''
-      if (src) {
-        iframes.push(fixUrl(src, url))
-      }
-    })
-
-    $print('详情页 iframe 列表: ' + JSON.stringify(iframes))
-
-    let iframeSrc = iframes.find(src =>
-      /playerrecord|recordplay|\/e\/|streamwish|filemoon|embed|player/i.test(src)
-    ) || iframes[0] || ''
-
-    if (iframeSrc) {
+    // 1. 先看看详情页源码里是否已经直接带了 m3u8 / mp4
+    const directStream = extractStreamUrl(data)
+    if (directStream) {
       tracks.push({
         name: '播放',
         pan: '',
         ext: {
-          url: iframeSrc,
-          referer: url,
+          url: directStream,
+          referer: 'https://sexkbj.com/',
+          direct: true,
         },
       })
     } else {
+      // 2. 否则抓取详情页里的 iframe / source / video 地址
+      const $ = cheerio.load(data)
+      let candidates = []
+
+      $('iframe').each((_, el) => {
+        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
+        if (src) candidates.push(src)
+      })
+
+      $('video source, video').each((_, el) => {
+        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
+        if (src) candidates.push(src)
+      })
+
+      $print('详情页候选播放地址: ' + JSON.stringify(candidates))
+
+      const target = candidates[0] || url
       tracks.push({
         name: '播放',
         pan: '',
         ext: {
-          url: url,
-          referer: 'https://sexkbj.com/',
+          url: target,
+          referer: url,
+          direct: false,
         },
       })
     }
@@ -203,37 +214,40 @@ async function getPlayinfo(ext) {
   let referer = ext.referer || 'https://sexkbj.com/'
 
   try {
-    const { data } = await $fetch.get(playUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': referer,
-      },
-    })
+    if (!ext.direct && playUrl) {
+      const { data } = await $fetch.get(playUrl, {
+        headers: {
+          'User-Agent': UA,
+          'Referer': referer,
+        },
+      })
 
-    let mediaUrl = findMedia(data)
+      let stream = extractStreamUrl(data)
 
-    if (!mediaUrl && typeof data === 'string') {
-      const $ = cheerio.load(data)
-      const subSrc = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
-      const nextUrl = fixUrl(subSrc, playUrl)
-      if (nextUrl && nextUrl !== playUrl) {
-        $print('尝试二层 iframe: ' + nextUrl)
-        const subRes = await $fetch.get(nextUrl, {
-          headers: {
-            'User-Agent': UA,
-            'Referer': playUrl,
-          },
-        })
-        playUrl = nextUrl
-        mediaUrl = findMedia(subRes.data)
+      // 如果第一层页面里还有内层 iframe，再追查一层
+      if (!stream && typeof data === 'string') {
+        const $ = cheerio.load(data)
+        const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+        const nextUrl = normalizeUrl(nextRaw, playUrl)
+        if (nextUrl && nextUrl !== playUrl) {
+          $print('继续追踪内层 iframe: ' + nextUrl)
+          const subRes = await $fetch.get(nextUrl, {
+            headers: {
+              'User-Agent': UA,
+              'Referer': playUrl,
+            },
+          })
+          playUrl = nextUrl
+          stream = extractStreamUrl(subRes.data)
+        }
       }
-    }
 
-    if (mediaUrl) {
-      playUrl = mediaUrl
-      $print('解析到播放地址: ' + playUrl)
-    } else {
-      $print('未找到 m3u8/mp4，返回地址: ' + playUrl)
+      if (stream) {
+        playUrl = stream
+        $print('成功提取 m3u8/mp4: ' + playUrl)
+      } else {
+        $print('未能提取到 m3u8/mp4，当前地址: ' + playUrl)
+      }
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
@@ -243,7 +257,7 @@ async function getPlayinfo(ext) {
     urls: [playUrl],
     headers: [{
       'User-Agent': UA,
-      'Referer': referer,
+      'Referer': 'https://sexkbj.com/',
       'Origin': 'https://sexkbj.com',
     }],
   })
