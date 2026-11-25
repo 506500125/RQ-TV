@@ -51,18 +51,14 @@ function pickBestStream(html) {
     $print('匹配到的全部流地址: ' + JSON.stringify(uniqueList))
   }
 
-  // 过滤掉明显带广告特征的链接
-  const noAdList = uniqueList.filter(u =>
+  const candidates = uniqueList.filter(u =>
     !/(\/ads?\/|preroll|midroll|postroll|commercial|promo|sponsor|vast|ima)/i.test(u)
   )
-  const pool = noAdList.length > 0 ? noAdList : uniqueList
 
-  // 优先选 so279tk.cc 或 master.m3u8
   return (
-    pool.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
-    pool.find(u => /so279tk\.cc/i.test(u)) ||
-    pool.find(u => /master\.m3u8/i.test(u)) ||
-    pool[0] ||
+    candidates.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
+    candidates.find(u => /so279tk\.cc/i.test(u)) ||
+    candidates.find(u => /master\.m3u8/i.test(u)) ||
     ''
   )
 }
@@ -107,11 +103,9 @@ async function getCards(ext) {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') ||
-                 $(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') ||
-                 $(el).find('img').attr('data-main-thumb') || ''
-      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
+      let cover = $(el).find('img.video-main-thumb').attr('src') \vert{}\vert{}$(el).find('img').attr('src') ||
+                 $(el).find('img').attr('data-src') \vert{}\vert{}$(el).find('img').attr('data-main-thumb') || ''
+      let duration = $(el).find('.duration').text().trim() \vert{}\vert{}$(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
         if (!href.startsWith('http')) href = appConfig.site + href
@@ -166,7 +160,7 @@ async function getTracks(ext) {
       let iframes = []
 
       $('iframe').each((_, el) => {
-        const src = fixLink($(el).attr('src') || $(el).attr('data-src') || '', url)
+        const src = fixLink($(el).attr('src') \vert{}\vert{}$(el).attr('data-src') || '', url)
         if (src) iframes.push(src)
       })
 
@@ -206,9 +200,12 @@ async function getPlayinfo(ext) {
   ext = argsify(ext)
   let playUrl = ext.url
   let referer = ext.referer || 'https://sexbjcam.com/'
+  let finalMediaUrl = ''
 
   try {
-    if (!ext.isDirect && playUrl) {
+    if (/\.(m3u8|mp4)(\?|$)/i.test(playUrl)) {
+      finalMediaUrl = playUrl
+    } else if (playUrl) {
       const { data } = await $fetch.get(playUrl, {
         headers: {
           'User-Agent': UA,
@@ -220,86 +217,5 @@ async function getPlayinfo(ext) {
 
       if (!found && typeof data === 'string') {
         const $ = cheerio.load(data)
-        const subRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
-        const subUrl = fixLink(subRaw, playUrl)
-        if (subUrl && subUrl !== playUrl) {
-          $print('检查二层 iframe: ' + subUrl)
-          const subRes = await $fetch.get(subUrl, {
-            headers: {
-              'User-Agent': UA,
-              'Referer': playUrl,
-            },
-          })
-          playUrl = subUrl
-          found = pickBestStream(subRes.data)
-        }
-      }
-
-      if (found) {
-        playUrl = found
-        $print('解析到播放地址: ' + playUrl)
-      } else {
-        $print('未能解析出 m3u8，当前返回地址: ' + playUrl)
-      }
-    }
-  } catch (e) {
-    $print('getPlayinfo 错误: ' + e)
-  }
-
-  return jsonify({
-    urls: [playUrl],
-    headers: [{
-      'User-Agent': UA,
-      'Referer': 'https://sexbjcam.com/',
-      'Origin': 'https://sexbjcam.com',
-    }],
-  })
-}
-
-async function search(ext) {
-  ext = argsify(ext)
-  let cards = []
-  const text = ext.text || ''
-  if (!text) return jsonify({ list: cards })
-
-  const url = appConfig.site + '/?s=' + encodeURIComponent(text)
-
-  try {
-    const { data } = await $fetch.get(url, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://sexbjcam.com/',
-      },
-    })
-
-    const $ = cheerio.load(data)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
-
-    items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
-      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      let duration = $(el).find('.duration').text().trim() || ''
-
-      if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: duration,
-          ext: {
-            url: href,
-          },
-        })
-      }
-    })
-  } catch (e) {
-    $print('search 错误: ' + e)
-  }
-
-  return jsonify({
-    list: cards,
-  })
-}
+        const subRaw = $('iframe').first().attr('src') \vert{}\vert{}$('iframe').first().attr('data-src') || ''
+        const subUrl = fixLink(subRaw
