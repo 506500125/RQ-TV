@@ -40,21 +40,31 @@ function fixLink(raw, base) {
   return appConfig.site + '/' + u.replace(/^\.?\//, '')
 }
 
-function extractM3u8(html) {
+function pickBestStream(html) {
   if (!html || typeof html !== 'string') return ''
   const text = html.replace(/\\\//g, '/')
-  const regs = [
-    /(https?:\/\/[^"'\\\s<>]+?so279tk\.cc[^"'\\\s<>]*?master\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\/video\/video\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
-  ]
-  for (const r of regs) {
-    const hit = text.match(r)
-    if (hit && hit[1]) return hit[1]
+
+  const allMatches = text.match(/https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi) || []
+  const uniqueList = [...new Set(allMatches)]
+
+  if (uniqueList.length > 0) {
+    $print('匹配到的全部流地址: ' + JSON.stringify(uniqueList))
   }
-  return ''
+
+  // 过滤掉明显带广告特征的链接
+  const noAdList = uniqueList.filter(u =>
+    !/(\/ads?\/|preroll|midroll|postroll|commercial|promo|sponsor|vast|ima)/i.test(u)
+  )
+  const pool = noAdList.length > 0 ? noAdList : uniqueList
+
+  // 优先选 so279tk.cc 或 master.m3u8
+  return (
+    pool.find(u => /so279tk\.cc/i.test(u) && /master\.m3u8/i.test(u)) ||
+    pool.find(u => /so279tk\.cc/i.test(u)) ||
+    pool.find(u => /master\.m3u8/i.test(u)) ||
+    pool[0] ||
+    ''
+  )
 }
 
 async function getConfig() {
@@ -140,7 +150,7 @@ async function getTracks(ext) {
       },
     })
 
-    const directStream = extractM3u8(data)
+    const directStream = pickBestStream(data)
     if (directStream) {
       tracks.push({
         name: '播放',
@@ -206,9 +216,8 @@ async function getPlayinfo(ext) {
         },
       })
 
-      let found = extractM3u8(data)
+      let found = pickBestStream(data)
 
-      // 若第一层页面里还有一层 iframe，再往下查一次
       if (!found && typeof data === 'string') {
         const $ = cheerio.load(data)
         const subRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
@@ -222,7 +231,7 @@ async function getPlayinfo(ext) {
             },
           })
           playUrl = subUrl
-          found = extractM3u8(subRes.data)
+          found = pickBestStream(subRes.data)
         }
       }
 
