@@ -150,6 +150,7 @@ async function getPlayinfo(ext) {
   let playUrl = ext.url
 
   try {
+    // 先访问 embed 页面
     const { data } = await $fetch.get(playUrl, {
       headers: {
         'User-Agent': UA,
@@ -157,16 +158,20 @@ async function getPlayinfo(ext) {
       },
     })
 
-    // 尝试匹配 m3u8
-    let m3u8Match = data.match(/(https?:\/\/[^"'\\s]+\.m3u8[^"'\\s]*)/i)
+    // 优先匹配类似你找到的这种真实地址
+    let m3u8Match = data.match(/(https?:\/\/[^"'\\s]+?\/video\/video\.m3u8[^"'\\s]*)/i)
+    if (!m3u8Match) {
+      m3u8Match = data.match(/(https?:\/\/[^"'\\s]+?\.m3u8[^"'\\s]*)/i)
+    }
+    if (!m3u8Match) {
+      m3u8Match = data.match(/["'](https?:\/\/[^"']+?\.m3u8[^"']*)["']/i)
+    }
+
     if (m3u8Match && m3u8Match[1]) {
       playUrl = m3u8Match[1]
-      $print('找到 m3u8: ' + playUrl)
+      $print('成功解析到 m3u8: ' + playUrl)
     } else {
-      m3u8Match = data.match(/["'](https?:\/\/[^"']+?\.m3u8[^"']*)["']/i)
-      if (m3u8Match && m3u8Match[1]) {
-        playUrl = m3u8Match[1]
-      }
+      $print('未直接匹配到 m3u8，返回原 embed 地址')
     }
   } catch (e) {
     $print('getPlayinfo 解析错误: ' + e)
@@ -176,7 +181,7 @@ async function getPlayinfo(ext) {
     urls: [playUrl],
     headers: [{
       'User-Agent': UA,
-      'Referer': playUrl.includes('playerrecord') ? playUrl : 'https://sexbjcam.com/',
+      'Referer': 'https://sexbjcam.com/',
     }],
   })
 }
