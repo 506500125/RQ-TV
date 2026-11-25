@@ -33,8 +33,8 @@ const appConfig = {
   ],
 }
 
-function resolveUrl(rawUrl, baseUrl) {
-  let u = (rawUrl || '').trim()
+function fixUrl(rawUrl, baseUrl) {
+  let u = String(rawUrl || '').trim()
   if (!u) return ''
   if (u.startsWith('http://') || u.startsWith('https://')) {
     return u
@@ -43,30 +43,24 @@ function resolveUrl(rawUrl, baseUrl) {
     return 'https:' + u
   }
   if (u.startsWith('/')) {
-    const originMatch = (baseUrl || appConfig.site).match(/^(https?:\/\/[^/]+)/i)
-    const origin = originMatch ? originMatch[1] : appConfig.site
-    return origin + u
+    const m = String(baseUrl || appConfig.site).match(/^(https?:\/\/[^/]+)/i)
+    return (m ? m[1] : appConfig.site) + u
   }
-  const baseDir = (baseUrl || appConfig.site + '/').replace(/[^/]*$/, '')
-  return baseDir + u
+  return appConfig.site + '/' + u.replace(/^\.?\//, '')
 }
 
-function extractMediaUrl(htmlText) {
-  if (!htmlText || typeof htmlText !== 'string') return ''
-  const cleaned = htmlText.replace(/\\\//g, '/')
-
-  const patterns = [
+function findMedia(text) {
+  if (!text || typeof text !== 'string') return ''
+  const s = text.replace(/\\\//g, '/')
+  const regs = [
     /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\/video\/video\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
     /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
   ]
-
-  for (const reg of patterns) {
-    const m = cleaned.match(reg)
-    if (m && m[1]) {
-      return m[1]
-    }
+  for (const r of regs) {
+    const hit = s.match(r)
+    if (hit && hit[1]) return hit[1]
   }
   return ''
 }
@@ -111,13 +105,14 @@ async function getCards(ext) {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') \vert{}\vert{}$(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') \vert{}\vert{}$(el).attr('data-main-thumb') || ''
-      let duration = $(el).find('.duration').text().trim() \vert{}\vert{}$(el).find('span.duration').text().trim() || ''
+      let cover = $(el).find('img.video-main-thumb').attr('src') ||
+                 $(el).find('img').attr('src') ||
+                 $(el).find('img').attr('data-src') ||
+                 $(el).find('img').attr('data-main-thumb') || ''
+      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
 
       if (href && title) {
-        href = resolveUrl(href, appConfig.site)
-        cover = resolveUrl(cover, appConfig.site)
+        if (!href.startsWith('http')) href = appConfig.site + href
         cards.push({
           vod_id: href,
           vod_name: title.trim(),
@@ -154,21 +149,20 @@ async function getTracks(ext) {
     })
 
     const $ = cheerio.load(data)
-    let foundIframes = []
+    let iframes = []
 
     $('iframe').each((_, el) => {
-      const rawSrc = $(el).attr('src') \vert{}\vert{}$(el).attr('data-src') || ''
-      const fullSrc = resolveUrl(rawSrc, url)
-      if (fullSrc) {
-        foundIframes.push(fullSrc)
+      let src = $(el).attr('src') || $(el).attr('data-src') || ''
+      if (src) {
+        iframes.push(fixUrl(src, url))
       }
     })
 
-    $print('找到 iframe 数量: ' + foundIframes.length + ' -> ' + JSON.stringify(foundIframes))
+    $print('详情页 iframe 列表: ' + JSON.stringify(iframes))
 
-    let iframeSrc = foundIframes.find(src =>
+    let iframeSrc = iframes.find(src =>
       /playerrecord|recordplay|\/e\/|streamwish|filemoon|embed|player/i.test(src)
-    ) || foundIframes[0] || ''
+    ) || iframes[0] || ''
 
     if (iframeSrc) {
       tracks.push({
@@ -180,7 +174,6 @@ async function getTracks(ext) {
         },
       })
     } else {
-      // 如果没有 iframe，也尝试直接把详情页传给 getPlayinfo 兜底查找
       tracks.push({
         name: '播放',
         pan: '',
@@ -217,25 +210,22 @@ async function getPlayinfo(ext) {
       },
     })
 
-    let mediaUrl = extractMediaUrl(data)
+    let mediaUrl = findMedia(data)
 
-    // 如果第一层没有直接拿到视频流，尝试找内层嵌套 iframe 再查一次
     if (!mediaUrl && typeof data === 'string') {
       const $ = cheerio.load(data)
-      const innerRaw = $('iframe').first().attr('src') \vert{}\vert{}$('iframe').first().attr('data-src') || ''
-      const innerUrl = resolveUrl(innerRaw, playUrl)
-
-      if (innerUrl && innerUrl !== playUrl) {
-        $print('尝试二层 iframe: ' + innerUrl)
-        const subRes = await $fetch.get(innerUrl, {
+      const subSrc = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+      const nextUrl = fixUrl(subSrc, playUrl)
+      if (nextUrl && nextUrl !== playUrl) {
+        $print('尝试二层 iframe: ' + nextUrl)
+        const subRes = await $fetch.get(nextUrl, {
           headers: {
             'User-Agent': UA,
             'Referer': playUrl,
           },
         })
-        playUrl = innerUrl
-        referer = ext.referer || 'https://sexkbj.com/'
-        mediaUrl = extractMediaUrl(subRes.data)
+        playUrl = nextUrl
+        mediaUrl = findMedia(subRes.data)
       }
     }
 
@@ -243,7 +233,7 @@ async function getPlayinfo(ext) {
       playUrl = mediaUrl
       $print('解析到播放地址: ' + playUrl)
     } else {
-      $print('未能直接解析出 m3u8/mp4，当前返回地址: ' + playUrl)
+      $print('未找到 m3u8/mp4，返回地址: ' + playUrl)
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
@@ -282,12 +272,11 @@ async function search(ext) {
       const a = $(el).find('a').first()
       let href = a.attr('href') || ''
       let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
-      let cover = $(el).find('img').attr('src') \vert{}\vert{}$(el).find('img').attr('data-src') || ''
+      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
       let duration = $(el).find('.duration').text().trim() || ''
 
       if (href && title) {
-        href = resolveUrl(href, appConfig.site)
-        cover = resolveUrl(cover, appConfig.site)
+        if (!href.startsWith('http')) href = appConfig.site + href
         cards.push({
           vod_id: href,
           vod_name: title.trim(),
@@ -295,3 +284,15 @@ async function search(ext) {
           vod_remarks: duration,
           ext: {
             url: href,
+          },
+        })
+      }
+    })
+  } catch (e) {
+    $print('search 错误: ' + e)
+  }
+
+  return jsonify({
+    list: cards,
+  })
+}
