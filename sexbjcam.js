@@ -1,10 +1,19 @@
 const cheerio = createCheerio()
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
-// 注意：2026-11-27 核查时 sexbjcam.com 在公开 DNS 里已无记录（NXDOMAIN），
-// 从这边和云端浏览器都打不开，无法对照真站验证。本文件沿用仓库原有结构，
-// 另补了与 sexkbj2.js 相同的两处播放修正：解包 VidHide 风格打包代码取 m3u8、
-// 找不到直链时返回空列表而不是播放页地址。若域名恢复，可直接用。
+// 实测核对（2026-11-27，浏览器打开真站）：
+//   站点是 WordPress 视频站，首页分 Recently added / Most Viewed 两个区，
+//   卡片是 <article> > <a href=详情> > <img>，标题和时长都在 <a> 的文字里，
+//   如 kbj26112680_JINRICP_20261120 ⏱ 47:16，封面是 wp-content/uploads 下的 jpg。
+//   分类只有 2 个：KOREAN BJ /category/korean-bj/，CHINESE GIRL 的站内拼写
+//   是 /category/chinese-gril/（注意是 gril 不是 girl）。
+//   翻页 /page/N/（KOREAN BJ 末页 2859），搜索 /?s=关键词，均已实测。
+//   详情页主播放器是主 <article> 内的第 1 个 iframe，广告 iframe（直播、
+//   Stripchat）在 article 外；页面文字里看不到 mp4/m3u8，iframe 的域名没
+//   能直接确认——getTracks 按 playerrecord 优先、再取 article 内 iframe
+//   的顺序拿，getPlayinfo 负责从里面解 m3u8（支持 VidHide 风格打包代码）。
+//   注意：本站有 Cloudflare 验证，从服务器直接抓会被拦（403 Just a moment），
+//   电视上的家宽 IP 通常能直接过。
 
 const appConfig = {
   ver: 1,
@@ -13,7 +22,7 @@ const appConfig = {
   tabs: [
     { name: '最新', ext: { id: '/?filter=latest' } },
     { name: 'KOREAN BJ', ext: { id: '/category/korean-bj/' } },
-    { name: 'CHINESE GIRL', ext: { id: '/category/chinese-girl/' } },
+    { name: 'CHINESE GIRL', ext: { id: '/category/chinese-gril/' } },
   ],
 }
 
@@ -28,6 +37,49 @@ function normalizeUrl(rawUrl, baseUrl) {
   if (u.startsWith('//')) return 'https:' + u
   const base = (baseUrl || appConfig.site).replace(/\/+$/, '')
   return u.startsWith('/') ? base + u : base + '/' + u
+}
+
+function parseCards($) {
+  const cards = []
+  let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+
+  items.each((_, el) => {
+    const a = $(el).find('a').first()
+    let href = a.attr('href') || ''
+    // 标题和时长都在 <a> 的文字里（如 kbj26112680_JINRICP_20261120 ⏱ 47:16），
+    // data-title / img alt / .duration 不一定有，拿不到时从链接文字里兜底。
+    let linkText = (a.text() || '').replace(/\s+/g, ' ').trim()
+    let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
+    if (!duration) {
+      const dm = linkText.match(/\d{1,2}:\d{2}(:\d{2})?/)
+      if (dm) duration = dm[0]
+    }
+    let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
+    if (!title && linkText) {
+      title = linkText
+      if (duration) title = title.replace(duration, '')
+      title = title.replace(/⏱/g, '').replace(/\s+/g, ' ').trim()
+    }
+    let cover =
+      $(el).find('img.video-main-thumb').attr('src') ||
+      $(el).find('img').attr('src') ||
+      $(el).find('img').attr('data-src') ||
+      $(el).find('img').attr('data-main-thumb') ||
+      ''
+
+    if (href && title) {
+      href = normalizeUrl(href, appConfig.site)
+      cover = normalizeUrl(cover, appConfig.site)
+      cards.push({
+        vod_id: href,
+        vod_name: title.trim(),
+        vod_pic: cover,
+        vod_remarks: duration,
+        ext: { url: href },
+      })
+    }
+  })
+  return cards
 }
 
 async function getCards(ext) {
@@ -61,32 +113,7 @@ async function getCards(ext) {
     }
 
     const $ = cheerio.load(html)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
-
-    items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover =
-        $(el).find('img.video-main-thumb').attr('src') ||
-        $(el).find('img').attr('src') ||
-        $(el).find('img').attr('data-src') ||
-        $(el).find('img').attr('data-main-thumb') ||
-        ''
-      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
-
-      if (href && title) {
-        href = normalizeUrl(href, appConfig.site)
-        cover = normalizeUrl(cover, appConfig.site)
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: duration,
-          ext: { url: href },
-        })
-      }
-    })
+    cards = parseCards($)
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
@@ -118,6 +145,16 @@ async function getTracks(ext) {
         iframeSrc = normalizeUrl(src, url)
       }
     })
+
+    // 主播放器是主 <article> 内的第 1 个 iframe；广告 iframe（直播、
+    // Stripchat）在 article 外，所以按 playerrecord > article 内 iframe
+    // > 第 1 个 iframe 的顺序拿，避免误拿广告 iframe。
+    if (!iframeSrc) {
+      let artSrc = $('article iframe').first().attr('src') || $('article iframe').first().attr('data-src') || ''
+      if (artSrc) {
+        iframeSrc = normalizeUrl(artSrc, url)
+      }
+    }
 
     if (!iframeSrc) {
       let firstSrc = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
@@ -319,25 +356,7 @@ async function search(ext) {
 
     const html = typeof data === 'string' ? data : JSON.stringify(data || '')
     const $ = cheerio.load(html)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
-
-    items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
-      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      let duration = $(el).find('.duration').text().trim() || ''
-
-      if (href && title) {
-        cards.push({
-          vod_id: normalizeUrl(href, appConfig.site),
-          vod_name: title.trim(),
-          vod_pic: normalizeUrl(cover, appConfig.site),
-          vod_remarks: duration,
-          ext: { url: normalizeUrl(href, appConfig.site) },
-        })
-      }
-    })
+    cards = parseCards($)
   } catch (e) {
     $print('search 错误: ' + e)
   }
