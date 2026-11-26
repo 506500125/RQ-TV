@@ -1,203 +1,343 @@
-// sexkbj2.js — SexKBJ 的 XPTV / TVBox 猫爪源（CatVod JS Spider, type=3）
-// 站点: https://sexkbj.com ，WordPress 视频站
-// 实测结构（2026-11-27）:
-//   首页/分类: <article class="... thumb-block ...">，内含详情链接、标题、封面(data-src)、
-//              时长 <span class="duration">、观看数 <span class="views">
-//   分类: /category/korean-bj/ /category/korean-amateur/ /category/afreecatv/
+// sexkbj2.js — SexKBJ 的 XPTV JS 扩展源
+// 格式：XPTV 扩展（getConfig / getCards / getTracks / getPlayinfo / search），
+// 与仓库里已有的 sexkbj.js 同一套写法，my.json 里用 api "csp_sexkbj2" 注册。
+// 站点：https://sexkbj.com ，WordPress 视频站
+// 实测结构（2026-11-27）：
+//   列表：<article class="... thumb-block ...">，内含详情链接、标题、封面（data-src）、
+//         时长 <span class="duration">
+//   分类：/category/korean-bj/ /category/korean-amateur/ /category/afreecatv/
 //         /category/premium/ ，翻页 /category/<slug>/page/<n>/，首页翻页 /page/<n>/
-//   搜索: /?s=<关键词>
-//   详情: <h1 class="entry-title">、<meta itemprop="thumbnailUrl">、
-//         <meta itemprop="duration" content="P0DT0H44M14S">、#video-actors、
-//         播放器是 <IFRAME SRC="https://sexkbj.top/embed/<id>">（VidHide 托管，
+//   搜索：/?s=<关键词>
+//   详情：播放器是 <IFRAME SRC="https://sexkbj.top/embed/<id>">（VidHide 托管，
 //         直链 m3u8 经混淆 JS 动态生成，静态抓不到稳定地址）
-//   因此播放不硬解 m3u8：detail 把 embed 地址当作播放源，playerContent 返回
-//   parse=1，交给 XPTV / TVBox 自带的解析/嗅探去跑这个 embed 页。
-//   如果你的 XPTV 版本播不了 embed 页，说明它解析不了 VidHide，这一点换写法也绕不过。
+//   因此 getPlayinfo 先尽力从详情页和 embed 页里提取 m3u8/mp4 直链，
+//   提不到就返回空列表——这一点换写法也绕不过，取决于播放器能不能解析 VidHide。
 //
-// 依赖: 运行环境提供的 request(url)（返回 HTML 字符串），其余只用纯 JS 正则，
-// 不依赖 pdfh/pdfa/pd，避免不同版本选择器口径不一致。
+// 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
 
-var HOST = 'https://sexkbj.com';
-var UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+const cheerio = createCheerio()
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
-function init(ext) {
-    if (ext) {
-        HOST = String(ext).replace(/\/+$/, '');
+const appConfig = {
+  ver: 1,
+  title: 'SexKBJ2',
+  site: 'https://sexkbj.com',
+  tabs: [
+    {
+      name: '最新',
+      ext: {
+        id: '/',
+      },
+    },
+    {
+      name: '最热',
+      ext: {
+        id: '/?filter=most-viewed',
+      },
+    },
+    {
+      name: 'Korean BJ',
+      ext: {
+        id: '/category/korean-bj/',
+      },
+    },
+    {
+      name: 'Korean Amateur',
+      ext: {
+        id: '/category/korean-amateur/',
+      },
+    },
+    {
+      name: 'AFREECATV',
+      ext: {
+        id: '/category/afreecatv/',
+      },
+    },
+    {
+      name: 'Premium',
+      ext: {
+        id: '/category/premium/',
+      },
+    },
+  ],
+}
+
+function normalizeUrl(rawUrl, baseUrl) {
+  let u = String(rawUrl || '').trim()
+  if (!u) return ''
+  u = u.replace(/\\\//g, '/')
+  if (u.startsWith('http://') || u.startsWith('https://')) {
+    return u
+  }
+  if (u.startsWith('//')) {
+    return 'https:' + u
+  }
+  if (u.startsWith('/')) {
+    const m = String(baseUrl || appConfig.site).match(/^(https?:\/\/[^/]+)/i)
+    return (m ? m[1] : appConfig.site) + u
+  }
+  return appConfig.site + '/' + u.replace(/^\.?\//, '')
+}
+
+function isDirectMediaUrl(u) {
+  if (!u || typeof u !== 'string') return false
+  return /\.(m3u8|mp4)(\?|$)/i.test(u)
+}
+
+function extractStreamUrl(text) {
+  if (!text || typeof text !== 'string') return ''
+  const cleaned = text.replace(/\\\//g, '/')
+
+  // 注意：站内封面叫 <名字>.mp4.jpg / <名字>.mp4-640x360.jpg，.mp4 后面必须
+  // 是 ?、#、引号、空白或结尾才算真正的流地址，否则会把封面图当成视频。
+  const patterns = [
+    /(https?:\/\/[^"'\\\s<>]+?sexkbj\.top[^"'\\\s<>]*?\.m3u8(?=[?#"'\\\s<>]|$)[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8(?=[?#"'\\\s<>]|$)[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8(?=[?#"'\\\s<>]|$)[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?\.m3u8(?=[?#"'\\\s<>]|$)[^"'\\\s<>]*)/i,
+    /(https?:\/\/[^"'\\\s<>]+?\.mp4(?=[?#"'\\\s<>]|$)[^"'\\\s<>]*)/i,
+  ]
+
+  for (const reg of patterns) {
+    const m = cleaned.match(reg)
+    if (m && m[1]) {
+      return m[1]
     }
+  }
+  return ''
 }
 
-function get(url) {
-    var res = request(url);
-    if (typeof res === 'string') return res;
-    if (res && typeof res === 'object') return res.content || res.body || res.data || '';
-    return '';
+async function getConfig() {
+  return jsonify(appConfig)
 }
 
-function unesc(s) {
-    if (!s) return '';
-    return String(s)
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#0?39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 10)); });
-}
+async function getCards(ext) {
+  ext = argsify(ext)
+  let cards = []
+  let { page = 1, id } = ext
 
-function pick(str, re) {
-    var m = str.match(re);
-    return m ? unesc(m[1].trim()) : '';
-}
-
-function parseDurationISO(s) {
-    // P0DT0H44M14S -> 44:14 ；P0DT1H2M3S -> 1:02:03
-    var m = String(s || '').match(/P(?:\d+D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-    if (!m) return String(s || '');
-    var h = parseInt(m[1] || '0', 10), mi = parseInt(m[2] || '0', 10), se = parseInt(m[3] || '0', 10);
-    function two(n) { return (n < 10 ? '0' : '') + n; }
-    if (h > 0) return h + ':' + two(mi) + ':' + two(se);
-    return mi + ':' + two(se);
-}
-
-function parseList(html) {
-    var list = [];
-    var re = /<article[^>]*class="[^"]*thumb-block[^"]*"[^>]*>([\s\S]*?)<\/article>/g;
-    var m;
-    while ((m = re.exec(html)) !== null) {
-        var block = m[1];
-        var href = pick(block, /<a\s+href="([^"]+)"/);
-        if (!href) continue;
-        if (href.charAt(0) === '/') href = HOST + href;
-        var title = pick(block, /<a\s+href="[^"]+"\s+title="([^"]+)"/)
-            || pick(block, /<header[^>]*>\s*<span>([^<]+)<\/span>/);
-        var pic = pick(block, /<img[^>]*data-src="([^"]+)"/)
-            || pick(block, /<img[^>]*src="([^"]+)"/);
-        var duration = pick(block, /<span class="duration">[\s\S]*?([\d:]+)\s*<\/span>/);
-        var views = pick(block, /<span class="views">[\s\S]*?([\d,]+)\s*<\/span>/);
-        list.push({
-            vod_id: href,
-            vod_name: title,
-            vod_pic: pic,
-            vod_remarks: duration || (views ? views + ' views' : '')
-        });
-    }
-    return list;
-}
-
-function homeContent(filter) {
-    return JSON.stringify({
-        class: [
-            { type_id: 'latest', type_name: '最新' },
-            { type_id: 'korean-bj', type_name: 'Korean BJ' },
-            { type_id: 'korean-amateur', type_name: 'Korean Amateur' },
-            { type_id: 'afreecatv', type_name: 'AFREECATV' },
-            { type_id: 'premium', type_name: 'Premium' }
-        ],
-        filters: {}
-    });
-}
-
-function homeVideoContent() {
-    var html = get(HOST + '/');
-    return JSON.stringify({ list: parseList(html) });
-}
-
-function categoryContent(tid, pg, filter, extend) {
-    pg = parseInt(pg || '1', 10) || 1;
-    var url;
-    if (tid === 'latest') {
-        url = pg > 1 ? HOST + '/page/' + pg + '/' : HOST + '/';
+  let url = appConfig.site + id
+  if (page > 1) {
+    if (id.includes('?')) {
+      url = appConfig.site + id + '&page=' + page
     } else {
-        url = pg > 1
-            ? HOST + '/category/' + tid + '/page/' + pg + '/'
-            : HOST + '/category/' + tid + '/';
+      url = appConfig.site + id + 'page/' + page + '/'
     }
-    var html = get(url);
-    return JSON.stringify({
-        page: pg,
-        pagecount: 9999,
-        limit: 30,
-        total: 999999,
-        list: parseList(html)
-    });
+  }
+
+  try {
+    const { data } = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': 'https://sexkbj.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      },
+    })
+
+    if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
+      $print('被 Cloudflare 拦截了')
+      return jsonify({ list: [] })
+    }
+
+    const $ = cheerio.load(data)
+    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+
+    items.each((_, el) => {
+      const a = $(el).find('a').first()
+      let href = a.attr('href') || ''
+      let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
+      let cover = $(el).find('img.video-main-thumb').attr('src') ||
+                 $(el).find('img').attr('src') ||
+                 $(el).find('img').attr('data-src') ||
+                 $(el).find('img').attr('data-main-thumb') || ''
+      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
+
+      if (href && title) {
+        if (!href.startsWith('http')) href = appConfig.site + href
+        cards.push({
+          vod_id: href,
+          vod_name: title.trim(),
+          vod_pic: cover,
+          vod_remarks: duration,
+          ext: {
+            url: href,
+          },
+        })
+      }
+    })
+
+    $print('抓到视频数量: ' + cards.length)
+  } catch (e) {
+    $print('getCards 错误: ' + e)
+  }
+
+  return jsonify({
+    list: cards,
+  })
 }
 
-function searchContent(key, quick) {
-    var html = get(HOST + '/?s=' + encodeURIComponent(key));
-    return JSON.stringify({ list: parseList(html) });
+async function getTracks(ext) {
+  ext = argsify(ext)
+  let tracks = []
+  const url = ext.url
+
+  try {
+    const { data } = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': 'https://sexkbj.com/',
+      },
+    })
+
+    const directStream = extractStreamUrl(data)
+    if (directStream) {
+      tracks.push({
+        name: '播放',
+        pan: '',
+        ext: {
+          url: directStream,
+          referer: 'https://sexkbj.com/',
+        },
+      })
+    } else {
+      const $ = cheerio.load(data)
+      let candidates = []
+
+      $('iframe').each((_, el) => {
+        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
+        if (src) candidates.push(src)
+      })
+
+      $('video source, video').each((_, el) => {
+        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
+        if (src) candidates.push(src)
+      })
+
+      $print('详情页候选地址: ' + JSON.stringify(candidates))
+
+      tracks.push({
+        name: '播放',
+        pan: '',
+        ext: {
+          url: candidates[0] || url,
+          referer: url,
+        },
+      })
+    }
+  } catch (e) {
+    $print('getTracks 错误: ' + e)
+  }
+
+  return jsonify({
+    list: [
+      {
+        title: '在线播放',
+        tracks: tracks,
+      },
+    ],
+  })
 }
 
-function detailContent(ids) {
-    var id = ids[0];
-    var html = get(id);
-    var title = pick(html, /<h1[^>]*class="entry-title"[^>]*>([^<]+)<\/h1>/)
-        || pick(html, /<title>([^<]+?)\s*[&–-]/);
-    var pic = pick(html, /<meta[^>]*itemprop="thumbnailUrl"[^>]*content="([^"]+)"/)
-        || pick(html, /<meta[^>]*content="([^"]+)"[^>]*itemprop="thumbnailUrl"/);
-    var duration = parseDurationISO(pick(html, /<meta[^>]*itemprop="duration"[^>]*content="([^"]+)"/));
-    var actors = '';
-    var actorBlock = html.match(/<div id="video-actors">([\s\S]*?)<\/div>/);
-    if (actorBlock) {
-        var names = [];
-        var am = actorBlock[1].match(/<a[^>]*>([^<]+)<\/a>/g) || [];
-        for (var i = 0; i < am.length; i++) {
-            var t = am[i].replace(/<[^>]+>/g, '').trim();
-            if (t) names.push(unesc(t));
+async function getPlayinfo(ext) {
+  ext = argsify(ext)
+  let targetUrl = ext.url
+  let referer = ext.referer || 'https://sexkbj.com/'
+  let finalMediaUrl = ''
+
+  try {
+    if (isDirectMediaUrl(targetUrl)) {
+      finalMediaUrl = targetUrl
+    } else if (targetUrl) {
+      const { data } = await $fetch.get(targetUrl, {
+        headers: {
+          'User-Agent': UA,
+          'Referer': referer,
+        },
+      })
+
+      finalMediaUrl = extractStreamUrl(data)
+
+      if (!finalMediaUrl && typeof data === 'string') {
+        const $ = cheerio.load(data)
+        const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+        const nextUrl = normalizeUrl(nextRaw, targetUrl)
+        if (nextUrl && nextUrl !== targetUrl) {
+          $print('检查内层 iframe: ' + nextUrl)
+          const subRes = await $fetch.get(nextUrl, {
+            headers: {
+              'User-Agent': UA,
+              'Referer': targetUrl,
+            },
+          })
+          finalMediaUrl = extractStreamUrl(subRes.data)
         }
-        actors = names.join(' / ');
+      }
     }
-    var tags = '';
-    var tagBlock = html.match(/<div class="tags-list">([\s\S]*?)<\/div>/);
-    if (tagBlock) {
-        var tn = [];
-        var tm = tagBlock[1].match(/<a[^>]*>(?:<i[^>]*><\/i>)?([^<]+)<\/a>/g) || [];
-        for (var j = 0; j < tm.length; j++) {
-            var tt = tm[j].replace(/<[^>]+>/g, '').trim();
-            if (tt) tn.push(unesc(tt));
-        }
-        tags = tn.join(',');
+
+    if (finalMediaUrl) {
+      $print('提取到直链: ' + finalMediaUrl)
+    } else {
+      $print('未能从静态响应中提取到动态 m3u8/mp4 直链（该站流地址由前端播放器脚本动态生成）')
     }
-    var embed = pick(html, /<IFRAME\s+SRC="([^"]+)"/i);
-    return JSON.stringify({
-        list: [{
-            vod_id: id,
-            vod_name: title,
-            vod_pic: pic,
-            vod_year: '',
-            vod_area: '',
-            vod_actor: actors,
-            vod_director: '',
-            vod_remarks: duration,
-            vod_content: tags,
-            vod_play_from: 'SexKBJ',
-            vod_play_url: embed
-        }]
-    });
+  } catch (e) {
+    $print('getPlayinfo 错误: ' + e)
+  }
+
+  return jsonify({
+    urls: finalMediaUrl ? [finalMediaUrl] : [],
+    headers: [{
+      'User-Agent': UA,
+      'Referer': 'https://sexkbj.com/',
+      'Origin': 'https://sexkbj.com',
+    }],
+  })
 }
 
-function playerContent(flag, id, vipFlags) {
-    var url = String(id || '');
-    // 详情页直传过来的可能是详情 URL，先取一遍 embed 地址
-    if (url.indexOf('/embed/') === -1 && url.indexOf('.mp4') === -1 && url.indexOf('.m3u8') === -1) {
-        try {
-            var html = get(url);
-            var embed = pick(html, /<IFRAME\s+SRC="([^"]+)"/i);
-            if (embed) url = embed;
-        } catch (e) {}
-    }
-    if (/\.m3u8|\.mp4/.test(url)) {
-        return JSON.stringify({
-            parse: 0,
-            url: url,
-            header: { 'User-Agent': UA, 'Referer': HOST + '/' }
-        });
-    }
-    // embed 页（VidHide）：交给播放器解析/嗅探，不要硬返回它当直链
-    return JSON.stringify({
-        parse: 1,
-        jx: 1,
-        url: url,
-        header: { 'User-Agent': UA, 'Referer': HOST + '/' }
-    });
+async function search(ext) {
+  ext = argsify(ext)
+  let cards = []
+  const text = ext.text || ''
+  if (!text) return jsonify({ list: cards })
+
+  const url = appConfig.site + '/?s=' + encodeURIComponent(text)
+
+  try {
+    const { data } = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': 'https://sexkbj.com/',
+      },
+    })
+
+    const $ = cheerio.load(data)
+    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
+
+    items.each((_, el) => {
+      const a = $(el).find('a').first()
+      let href = a.attr('href') || ''
+      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
+      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
+      let duration = $(el).find('.duration').text().trim() || ''
+
+      if (href && title) {
+        if (!href.startsWith('http')) href = appConfig.site + href
+        cards.push({
+          vod_id: href,
+          vod_name: title.trim(),
+          vod_pic: cover,
+          vod_remarks: duration,
+          ext: {
+            url: href,
+          },
+        })
+      }
+    })
+  } catch (e) {
+    $print('search 错误: ' + e)
+  }
+
+  return jsonify({
+    list: cards,
+  })
 }

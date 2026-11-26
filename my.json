@@ -1,16 +1,1 @@
-{
-  "sites": [
-    {
-      "name": "SexBJCam",
-      "type": 3,
-      "api": "csp_sexbjcam",
-      "ext": "https://raw.githubusercontent.com/506500125/RQ-TV/refs/heads/main/sexbjcam.js"
-    },
-    {
-      "name": "SexKBJ",
-      "type": 3,
-      "api": "csp_sexkbj",
-      "ext": "https://raw.githubusercontent.com/506500125/RQ-TV/refs/heads/main/sexkbj.js"
-    }
-  ]
-}
+{"sites":[{"api":"csp_sexbjcam","ext":"https://raw.githubusercontent.com/506500125/RQ-TV/refs/heads/main/sexbjcam.js","name":"SexBJCam","type":3},{"api":"csp_sexkbj","ext":"https://raw.githubusercontent.com/506500125/RQ-TV/refs/heads/main/sexkbj.js","name":"SexKBJ","type":3},{"api":"csp_sexkbj2","ext":"https://raw.githubusercontent.com/506500125/RQ-TV/refs/heads/main/sexkbj2.js","name":"SexKBJ2","type":3}]}
