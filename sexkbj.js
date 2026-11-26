@@ -1,79 +1,88 @@
+// sexkbj.js — SexKBJ 的 XPTV JS 扩展源
+// 站点：https://sexkbj.tv ，API 驱动（与 koreanbj.tv 同一套后端）
+// 注意：本文件原来对应 sexkbj.com（WordPress 站），2026-11-27 起改成
+// sexkbj.tv；sexkbj.com 仍由 sexkbj2.js 覆盖。
+// 实测结构（2026-11-27）：
+//   列表 API：GET /api/videos?sort=newest|trending&limit=N&page=N
+//     返回 {videos:[{id,slug,title,thumbnailUrl,coverUrl,durationSeconds,views,
+//     creditCost,isPremium,actorName,...}], page}
+//     sort 只接受 newest / trending；offset 参数无效，用 page 翻页。
+//   搜索 API：GET /api/search?q=<关键词> 返回 {results:[同上结构]}
+//   详情页：https://sexkbj.tv/videos/<slug>（服务端渲染），免费视频在页面里有
+//     videoUrl:"https://store*.gofile.io/download/direct/<id>/<file>.mp4"
+//     和 <video src="同地址">；收费视频 videoUrl:null 且无 <video> 标签，
+//     只有预览片段。
+//   免费判断：creditCost==0 且 !isPremium。注意 creditCost==0 但
+//   isPremium==true 的视频是 premiumLocked，同样播不了（实测 videoUrl
+//   为 null、无 <video> 标签）。需要积分/会员的视频一律不显示。
+//   gofile 直链注意：store*.gofile.io 的 mp4 地址会 302 跳到
+//   file-*.gofile.io，且跳转后的地址仍校验 Referer 必须是详情页地址；
+//   播放器跟随跳转时可能丢 Referer 导致 403 黑屏，所以 getPlayinfo 里
+//   先用 $fetch 跟随一次跳转，把最终地址连同 Referer 一起返回。
+//
+// 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
+
 const cheerio = createCheerio()
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
   ver: 1,
   title: 'SexKBJ',
-  site: 'https://sexkbj.com',
+  site: 'https://sexkbj.tv',
   tabs: [
     {
       name: '最新',
       ext: {
-        id: '/?filter=latest',
+        sort: 'newest',
       },
     },
     {
       name: '最热',
       ext: {
-        id: '/?filter=most-viewed',
-      },
-    },
-    {
-      name: 'Korean BJ',
-      ext: {
-        id: '/category/korean-bj/',
-      },
-    },
-    {
-      name: 'Korean Amateur',
-      ext: {
-        id: '/category/korean-amateur/',
+        sort: 'trending',
       },
     },
   ],
 }
 
-function normalizeUrl(rawUrl, baseUrl) {
-  let u = String(rawUrl || '').trim()
-  if (!u) return ''
-  u = u.replace(/\\\//g, '/')
-  if (u.startsWith('http://') || u.startsWith('https://')) {
-    return u
-  }
-  if (u.startsWith('//')) {
-    return 'https:' + u
-  }
-  if (u.startsWith('/')) {
-    const m = String(baseUrl || appConfig.site).match(/^(https?:\/\/[^/]+)/i)
-    return (m ? m[1] : appConfig.site) + u
-  }
-  return appConfig.site + '/' + u.replace(/^\.?\//, '')
+function fmtDuration(sec) {
+  sec = parseInt(sec, 10) || 0
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  const mm = (h > 0 ? String(m).padStart(2, '0') : String(m))
+  const ss = String(s).padStart(2, '0')
+  return h > 0 ? h + ':' + mm + ':' + ss : mm + ':' + ss
 }
 
-function isDirectMediaUrl(u) {
-  if (!u || typeof u !== 'string') return false
-  return /\.(m3u8|mp4)(\?|$)/i.test(u)
+function isFree(v) {
+  return v && (v.creditCost === 0 || v.creditCost === null) && !v.isPremium
 }
 
-function extractStreamUrl(text) {
-  if (!text || typeof text !== 'string') return ''
-  const cleaned = text.replace(/\\\//g, '/')
+function mapVideo(v) {
+  const detailUrl = appConfig.site + '/videos/' + v.slug
+  return {
+    vod_id: detailUrl,
+    vod_name: (v.title || v.slug || '').trim(),
+    vod_pic: v.thumbnailUrl || v.coverUrl || '',
+    vod_remarks: fmtDuration(v.durationSeconds),
+    ext: {
+      url: detailUrl,
+      slug: v.slug,
+    },
+  }
+}
 
-  const patterns = [
-    /(https?:\/\/[^"'\\\s<>]+?sexkbj\.top[^"'\\\s<>]*?\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?index-v1-a1\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?master\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*)/i,
-    /(https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*)/i,
-  ]
-
-  for (const reg of patterns) {
-    const m = cleaned.match(reg)
-    if (m && m[1]) {
-      return m[1]
+function parseJson(data) {
+  if (!data) return null
+  if (typeof data === 'string') {
+    try {
+      return JSON.parse(data)
+    } catch (e) {
+      return null
     }
   }
-  return ''
+  return data
 }
 
 async function getConfig() {
@@ -83,59 +92,23 @@ async function getConfig() {
 async function getCards(ext) {
   ext = argsify(ext)
   let cards = []
-  let { page = 1, id } = ext
-
-  let url = appConfig.site + id
-  if (page > 1) {
-    if (id.includes('?')) {
-      url = appConfig.site + id + '&page=' + page
-    } else {
-      url = appConfig.site + id + 'page/' + page + '/'
-    }
-  }
+  const sort = ext.sort || 'newest'
+  const page = ext.page || 1
+  const url = appConfig.site + '/api/videos?sort=' + encodeURIComponent(sort) + '&limit=24&page=' + page
 
   try {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexkbj.com/',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Referer': appConfig.site + '/',
+        'Accept': 'application/json, */*',
       },
     })
-
-    if (data.includes('Just a moment') || data.includes('cf-browser-verification') || data.includes('Checking your browser')) {
-      $print('被 Cloudflare 拦截了')
-      return jsonify({ list: [] })
-    }
-
-    const $ = cheerio.load(data)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
-
-    items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || a.attr('title') || ''
-      let cover = $(el).find('img.video-main-thumb').attr('src') ||
-                 $(el).find('img').attr('src') ||
-                 $(el).find('img').attr('data-src') ||
-                 $(el).find('img').attr('data-main-thumb') || ''
-      let duration = $(el).find('.duration').text().trim() || $(el).find('span.duration').text().trim() || ''
-
-      if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: duration,
-          ext: {
-            url: href,
-          },
-        })
-      }
+    const json = parseJson(data)
+    const videos = (json && json.videos) || []
+    videos.forEach((v) => {
+      if (v && v.slug && isFree(v)) cards.push(mapVideo(v))
     })
-
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
@@ -148,106 +121,92 @@ async function getCards(ext) {
 
 async function getTracks(ext) {
   ext = argsify(ext)
-  let tracks = []
   const url = ext.url
-
-  try {
-    const { data } = await $fetch.get(url, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://sexkbj.com/',
-      },
-    })
-
-    const directStream = extractStreamUrl(data)
-    if (directStream) {
-      tracks.push({
-        name: '播放',
-        pan: '',
-        ext: {
-          url: directStream,
-          referer: 'https://sexkbj.com/',
-        },
-      })
-    } else {
-      const $ = cheerio.load(data)
-      let candidates = []
-
-      $('iframe').each((_, el) => {
-        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
-        if (src) candidates.push(src)
-      })
-
-      $('video source, video').each((_, el) => {
-        const src = normalizeUrl($(el).attr('src') || $(el).attr('data-src') || '', url)
-        if (src) candidates.push(src)
-      })
-
-      $print('详情页候选地址: ' + JSON.stringify(candidates))
-
-      tracks.push({
-        name: '播放',
-        pan: '',
-        ext: {
-          url: candidates[0] || url,
-          referer: url,
-        },
-      })
-    }
-  } catch (e) {
-    $print('getTracks 错误: ' + e)
-  }
-
   return jsonify({
     list: [
       {
         title: '在线播放',
-        tracks: tracks,
+        tracks: [
+          {
+            name: '播放',
+            pan: '',
+            ext: {
+              url: url,
+              referer: appConfig.site + '/',
+            },
+          },
+        ],
       },
     ],
   })
 }
 
+async function resolveGofileRedirect(url, referer) {
+  if (!url || url.indexOf('gofile.io') === -1) return url
+  try {
+    const res = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': referer,
+        'Range': 'bytes=0-0',
+      },
+    })
+    const req = (res && res.request) || {}
+    const finalUrl = (req.res && req.res.responseUrl) || req.responseURL || ''
+    if (finalUrl && finalUrl.indexOf('http') === 0 && finalUrl !== url) return finalUrl
+    const loc = (res && res.headers && (res.headers.location || res.headers.Location)) || ''
+    if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    return url
+  } catch (e) {
+    try {
+      const loc = (e && e.response && e.response.headers && (e.response.headers.location || e.response.headers.Location)) || ''
+      if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    } catch (_) {}
+    return url
+  }
+}
+
+function extractGofileMp4(html) {
+  if (!html || typeof html !== 'string') return ''
+  // 详情页 SSR 数据里的 videoUrl 是完整视频；收费视频这里是 null，
+  // 预览地址在 previewVideoUrl / previewUrls 里，不取。
+  const m = html.match(/videoUrl:"(https?:\/\/[^"]+\.mp4[^"]*)"/)
+  if (m && m[1] && m[1].indexOf('preview') === -1) return m[1]
+  // 兜底：主播放器 <video src="...gofile...mp4">
+  const v = html.match(/<video[^>]*src="(https?:\/\/[^"]*gofile\.io[^"]+\.mp4[^"]*)"/i)
+  if (v && v[1]) return v[1]
+  return ''
+}
+
 async function getPlayinfo(ext) {
   ext = argsify(ext)
   let targetUrl = ext.url
-  let referer = ext.referer || 'https://sexkbj.com/'
+  let referer = ext.referer || (appConfig.site + '/')
   let finalMediaUrl = ''
 
   try {
-    if (isDirectMediaUrl(targetUrl)) {
+    if (targetUrl && /\.(m3u8|mp4)(\?|#|$)/i.test(targetUrl)) {
       finalMediaUrl = targetUrl
     } else if (targetUrl) {
       const { data } = await $fetch.get(targetUrl, {
         headers: {
           'User-Agent': UA,
           'Referer': referer,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
       })
-
-      finalMediaUrl = extractStreamUrl(data)
-
-      if (!finalMediaUrl && typeof data === 'string') {
-        const $ = cheerio.load(data)
-        const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
-        const nextUrl = normalizeUrl(nextRaw, targetUrl)
-        if (nextUrl && nextUrl !== targetUrl) {
-          $print('检查内层 iframe: ' + nextUrl)
-          const subRes = await $fetch.get(nextUrl, {
-            headers: {
-              'User-Agent': UA,
-              'Referer': targetUrl,
-            },
-          })
-          finalMediaUrl = extractStreamUrl(subRes.data)
-        }
+      const html = typeof data === 'string' ? data : JSON.stringify(data || '')
+      finalMediaUrl = extractGofileMp4(html)
+      if (finalMediaUrl && finalMediaUrl.indexOf('gofile.io') !== -1) {
+        // 用详情页地址当 Referer 跟随一次 302，拿最终 file-*.gofile.io 地址
+        finalMediaUrl = await resolveGofileRedirect(finalMediaUrl, targetUrl)
       }
     }
 
     if (finalMediaUrl) {
       $print('提取到直链: ' + finalMediaUrl)
     } else {
-      $print('未能从静态响应中提取到动态 m3u8/mp4 直链（该站流地址由前端播放器脚本动态生成）')
+      $print('该视频需积分/未公开直链，返回空列表')
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
@@ -257,8 +216,7 @@ async function getPlayinfo(ext) {
     urls: finalMediaUrl ? [finalMediaUrl] : [],
     headers: [{
       'User-Agent': UA,
-      'Referer': 'https://sexkbj.com/',
-      'Origin': 'https://sexkbj.com',
+      'Referer': targetUrl || (appConfig.site + '/'),
     }],
   })
 }
@@ -269,38 +227,20 @@ async function search(ext) {
   const text = ext.text || ''
   if (!text) return jsonify({ list: cards })
 
-  const url = appConfig.site + '/?s=' + encodeURIComponent(text)
+  const url = appConfig.site + '/api/search?q=' + encodeURIComponent(text)
 
   try {
     const { data } = await $fetch.get(url, {
       headers: {
         'User-Agent': UA,
-        'Referer': 'https://sexkbj.com/',
+        'Referer': appConfig.site + '/',
+        'Accept': 'application/json, */*',
       },
     })
-
-    const $ = cheerio.load(data)
-    let items = $('article.loop-video, article.thumb-block, .videos-list article, .thumb-block')
-
-    items.each((_, el) => {
-      const a = $(el).find('a').first()
-      let href = a.attr('href') || ''
-      let title = a.attr('data-title') || $(el).find('img').attr('alt') || ''
-      let cover = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || ''
-      let duration = $(el).find('.duration').text().trim() || ''
-
-      if (href && title) {
-        if (!href.startsWith('http')) href = appConfig.site + href
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: duration,
-          ext: {
-            url: href,
-          },
-        })
-      }
+    const json = parseJson(data)
+    const results = (json && json.results) || []
+    results.forEach((v) => {
+      if (v && v.slug && isFree(v)) cards.push(mapVideo(v))
     })
   } catch (e) {
     $print('search 错误: ' + e)

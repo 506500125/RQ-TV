@@ -8,7 +8,12 @@
 //   详情：/videos/<slug>，免费视频页面里有
 //     videoUrl:"https://store*.gofile.io/download/direct/<id>/<file>.mp4"
 //     和 <video src="同地址">；收费视频 videoUrl:null，只有 preview 预览片段。
-//     直链 mp4 带 Referer: 详情页地址可直接播。
+//   gofile 直链注意（2026-11-27 实测，SKBJ 黑屏的原因）：
+//     store*.gofile.io 的 mp4 地址会 302 跳到 file-*.gofile.io，且跳转后
+//     的地址仍校验 Referer 必须是详情页地址；播放器跟随跳转时丢了 Referer
+//     就会 403 黑屏。所以 getPlayinfo 里先用 $fetch 跟随一次跳转，把最终
+//     地址连同 Referer（详情页地址）一起返回。最终地址加详情页 Referer
+//     实测 206、真 mp4 数据。
 //   列表页看不出是否收费，点播收费视频返回空列表（XPTV 会提示无法播放，
 //   而不是黑屏）。
 //
@@ -26,6 +31,12 @@ const appConfig = {
       name: '最新',
       ext: {
         id: '/videos',
+      },
+    },
+    {
+      name: '最热',
+      ext: {
+        id: '/videos?sort=trending',
       },
     },
     {
@@ -147,6 +158,31 @@ async function getTracks(ext) {
   })
 }
 
+async function resolveGofileRedirect(url, referer) {
+  if (!url || url.indexOf('gofile.io') === -1) return url
+  try {
+    const res = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': referer,
+        'Range': 'bytes=0-0',
+      },
+    })
+    const req = (res && res.request) || {}
+    const finalUrl = (req.res && req.res.responseUrl) || req.responseURL || ''
+    if (finalUrl && finalUrl.indexOf('http') === 0 && finalUrl !== url) return finalUrl
+    const loc = (res && res.headers && (res.headers.location || res.headers.Location)) || ''
+    if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    return url
+  } catch (e) {
+    try {
+      const loc = (e && e.response && e.response.headers && (e.response.headers.location || e.response.headers.Location)) || ''
+      if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    } catch (_) {}
+    return url
+  }
+}
+
 function extractGofileMp4(html) {
   if (!html || typeof html !== 'string') return ''
   // 详情页 SSR 数据里的 videoUrl 是完整视频；收费视频这里是 null，
@@ -178,6 +214,10 @@ async function getPlayinfo(ext) {
       })
       const html = typeof data === 'string' ? data : JSON.stringify(data || '')
       finalMediaUrl = extractGofileMp4(html)
+      if (finalMediaUrl && finalMediaUrl.indexOf('gofile.io') !== -1) {
+        // 用详情页地址当 Referer 跟随一次 302，拿最终 file-*.gofile.io 地址
+        finalMediaUrl = await resolveGofileRedirect(finalMediaUrl, targetUrl)
+      }
     }
 
     if (finalMediaUrl) {

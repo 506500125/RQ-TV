@@ -7,11 +7,17 @@
 //     sort 只接受 newest / trending；offset 参数无效，用 page 翻页。
 //   搜索 API：GET /api/search?q=<关键词> 返回 {results:[同上结构]}
 //   详情页：https://koreanbj.tv/videos/<slug>（服务端渲染），免费视频在页面里有
-//     videoUrl:"https://store*.gofile.io/download/direct/<id>/<file>.mp4"
-//     和 <video src="同地址">；收费视频 videoUrl:null，sources 里 url:null。
-//     直链 mp4 带 Referer: 详情页地址可直接播（实测 200/206，真 mp4 数据）。
-//   免费判断：creditCost==0 且 !isPremium。列表里收费视频会标 🔒需积分，
-//   点播收费视频返回空列表（XPTV 会提示无法播放，而不是黑屏）。
+//     <video src="https://store*.gofile.io/download/direct/<id>/<file>.mp4">；
+//     videoUrl 字段有时是 null，别只认它。收费视频 videoUrl:null 且无
+//     <video> 标签，只有预览片段。
+//   免费判断：creditCost==0 且 !isPremium。注意 creditCost==0 但
+//   isPremium==true 的视频是 premiumLocked，同样播不了（实测 videoUrl
+//   为 null、无 <video> 标签）。需要积分/会员的视频一律不显示（2026-11-27
+//   用户要求：反正播不了，别在 XPTV 里出现）。
+//   gofile 直链注意：store*.gofile.io 的 mp4 地址会 302 跳到
+//   file-*.gofile.io，且跳转后的地址仍校验 Referer 必须是详情页地址；
+//   播放器跟随跳转时可能丢 Referer 导致 403 黑屏，所以 getPlayinfo 里
+//   先用 $fetch 跟随一次跳转，把最终地址连同 Referer 一起返回。
 //
 // 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
 
@@ -54,7 +60,7 @@ function isFree(v) {
 
 function mapVideo(v) {
   const detailUrl = appConfig.site + '/videos/' + v.slug
-  const remarks = fmtDuration(v.durationSeconds) + (isFree(v) ? '' : ' 🔒需积分')
+  const remarks = fmtDuration(v.durationSeconds)
   return {
     vod_id: detailUrl,
     vod_name: (v.title || v.slug || '').trim(),
@@ -101,7 +107,7 @@ async function getCards(ext) {
     const json = parseJson(data)
     const videos = (json && json.videos) || []
     videos.forEach((v) => {
-      if (v && v.slug) cards.push(mapVideo(v))
+      if (v && v.slug && isFree(v)) cards.push(mapVideo(v))
     })
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
@@ -135,6 +141,31 @@ async function getTracks(ext) {
   })
 }
 
+async function resolveGofileRedirect(url, referer) {
+  if (!url || url.indexOf('gofile.io') === -1) return url
+  try {
+    const res = await $fetch.get(url, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': referer,
+        'Range': 'bytes=0-0',
+      },
+    })
+    const req = (res && res.request) || {}
+    const finalUrl = (req.res && req.res.responseUrl) || req.responseURL || ''
+    if (finalUrl && finalUrl.indexOf('http') === 0 && finalUrl !== url) return finalUrl
+    const loc = (res && res.headers && (res.headers.location || res.headers.Location)) || ''
+    if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    return url
+  } catch (e) {
+    try {
+      const loc = (e && e.response && e.response.headers && (e.response.headers.location || e.response.headers.Location)) || ''
+      if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+    } catch (_) {}
+    return url
+  }
+}
+
 function extractGofileMp4(html) {
   if (!html || typeof html !== 'string') return ''
   // 详情页 SSR 数据里的 videoUrl 是完整视频；收费视频这里是 null，
@@ -166,6 +197,10 @@ async function getPlayinfo(ext) {
       })
       const html = typeof data === 'string' ? data : JSON.stringify(data || '')
       finalMediaUrl = extractGofileMp4(html)
+      if (finalMediaUrl && finalMediaUrl.indexOf('gofile.io') !== -1) {
+        // 用详情页地址当 Referer 跟随一次 302，拿最终 file-*.gofile.io 地址
+        finalMediaUrl = await resolveGofileRedirect(finalMediaUrl, targetUrl)
+      }
     }
 
     if (finalMediaUrl) {
@@ -205,7 +240,7 @@ async function search(ext) {
     const json = parseJson(data)
     const results = (json && json.results) || []
     results.forEach((v) => {
-      if (v && v.slug) cards.push(mapVideo(v))
+      if (v && v.slug && isFree(v)) cards.push(mapVideo(v))
     })
   } catch (e) {
     $print('search 错误: ' + e)
