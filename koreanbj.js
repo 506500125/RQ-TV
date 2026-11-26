@@ -141,29 +141,69 @@ async function getTracks(ext) {
   })
 }
 
+// 从响应头里按名字取 Location（不区分大小写）
+function pickHeader(headers, name) {
+  if (!headers || typeof headers !== 'object') return ''
+  if (headers[name]) return String(headers[name])
+  var lower = name.toLowerCase()
+  for (var k in headers) {
+    if (k && k.toLowerCase() === lower) return String(headers[k])
+  }
+  return ''
+}
+
+// 从 $fetch 响应对象里能拿到的任何字段里找最终地址。
+// 不同运行环境字段名不一样，这里把常见的都试一遍。
+function finalUrlFromResponse(res) {
+  if (!res || typeof res !== 'object') return ''
+  var cands = [
+    res.url, res.responseUrl, res.responseURL, res.finalUrl,
+    res.finalURL, res.requestUrl, res.effectiveUrl,
+  ]
+  for (var i = 0; i < cands.length; i++) {
+    if (cands[i] && String(cands[i]).indexOf('http') === 0) return String(cands[i])
+  }
+  var req = res.request
+  if (req && typeof req === 'object') {
+    if (req.url && String(req.url).indexOf('http') === 0) return String(req.url)
+    if (req.responseURL && String(req.responseURL).indexOf('http') === 0) return String(req.responseURL)
+    if (req.res && req.res.responseUrl && String(req.res.responseUrl).indexOf('http') === 0) return String(req.res.responseUrl)
+  }
+  return ''
+}
+
 async function resolveGofileRedirect(url, referer) {
   if (!url || url.indexOf('gofile.io') === -1) return url
+  var headers = {
+    'User-Agent': UA,
+    'Referer': referer,
+    'Range': 'bytes=0-0',
+  }
+  // 1) 尽量不跟随跳转，直接读 302 的 Location。XPTV 的 $fetch 若支持
+  //    redirect:'manual'，这里就能拿到最终地址；不支持时也无害。
+  //    注意：跳转目标每个文件都不一样（实测有 file-na-chi-1，也有
+  //    file-eu-par-1），不能靠猜主机名，必须真拿到 Location。
   try {
-    const res = await $fetch.get(url, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': referer,
-        'Range': 'bytes=0-0',
-      },
-    })
-    const req = (res && res.request) || {}
-    const finalUrl = (req.res && req.res.responseUrl) || req.responseURL || ''
-    if (finalUrl && finalUrl.indexOf('http') === 0 && finalUrl !== url) return finalUrl
-    const loc = (res && res.headers && (res.headers.location || res.headers.Location)) || ''
-    if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
-    return url
+    var res1 = await $fetch.get(url, { headers: headers, redirect: 'manual' })
+    var loc1 = pickHeader(res1 && res1.headers, 'location')
+    if (loc1 && loc1.indexOf('http') === 0 && loc1 !== url) return loc1
+    var fin1 = finalUrlFromResponse(res1)
+    if (fin1 && fin1 !== url) return fin1
+  } catch (e) {}
+  // 2) 跟随一次跳转，从响应对象里找最终地址
+  try {
+    var res2 = await $fetch.get(url, { headers: headers })
+    var fin2 = finalUrlFromResponse(res2)
+    if (fin2 && fin2 !== url) return fin2
+    var loc2 = pickHeader(res2 && res2.headers, 'location')
+    if (loc2 && loc2.indexOf('http') === 0 && loc2 !== url) return loc2
   } catch (e) {
     try {
-      const loc = (e && e.response && e.response.headers && (e.response.headers.location || e.response.headers.Location)) || ''
-      if (loc && loc.indexOf('http') === 0 && loc !== url) return loc
+      var loc3 = pickHeader(e && e.response && e.response.headers, 'location')
+      if (loc3 && loc3.indexOf('http') === 0 && loc3 !== url) return loc3
     } catch (_) {}
-    return url
   }
+  return url
 }
 
 function extractGofileMp4(html) {

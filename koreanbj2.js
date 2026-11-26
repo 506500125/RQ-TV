@@ -77,6 +77,26 @@ async function getConfig() {
   return jsonify(appConfig)
 }
 
+// 封面可能藏在懒加载属性里（data-src / srcset），src 本身可能是占位图；
+// 也可能是相对地址，统一转成绝对地址再交给 XPTV。
+function pickCover(img) {
+  if (!img || !img.length) return ''
+  var attrs = [
+    img.attr('data-src'), img.attr('data-lazy-src'), img.attr('data-original'),
+    img.attr('src'), img.attr('srcset'), img.attr('data-srcset'),
+  ]
+  for (var i = 0; i < attrs.length; i++) {
+    var c = String(attrs[i] || '').trim()
+    if (!c || c.indexOf('data:') === 0) continue
+    if (c.indexOf('placeholder') !== -1) continue
+    // srcset 是 "url 300w, url 600w" 形式，取第一条
+    if (/,\s*\S+\s+\d+w/.test(c)) c = c.split(',')[0].trim().split(/\s+/)[0]
+    if (!c) continue
+    return normalizeUrl(c)
+  }
+  return ''
+}
+
 function parseCards($) {
   const cards = []
   const seen = {}
@@ -84,8 +104,9 @@ function parseCards($) {
     const a = $(el)
     const href = a.attr('href') || ''
     if (!href || seen[href]) return
-    const img = a.find('img').first()
-    const cover = img.attr('src') || img.attr('data-src') || ''
+    let img = a.find('img').first()
+    if (!img.length) img = a.closest('article').find('img').first()
+    const cover = pickCover(img)
     // 链接文字是「标题 播放量 时长」，且可能重复拼接，先取第一段
     let text = a.text().replace(/\s+/g, ' ').trim()
     const durMatch = text.match(/(\d{1,2}:\d{2}(?::\d{2})?)/)
