@@ -9,11 +9,14 @@
 //   卡片：<article> > <a href="/video/<slug>/"> > <img>；
 //         链接文字是「标题 播放量 时长」，如 ruruka820_32 0 04:23；
 //         封面 wp-content/uploads/…jpg；详情地址必须是 /video/ 前缀。
-//   详情：/video/<slug>/ ，播放器是点 ▶ 后才注入的 VOE 嵌入 iframe
-//     （如 https://io12379storege.xyz/e/<id>/），初始页面结构里没有；
-//     VOE 把真实流地址藏在混淆 JS 里，静态提取不可靠。getPlayinfo 会
-//     先找页面里的直链（mp4/m3u8）和嵌入 iframe，再去嵌入页里找直链；
-//     找不到就返回空列表（提示无法播放），不把网页地址当视频地址交出去。
+//   详情：/video/<slug>/ ，主播放器（Player 1）iframe 在页面加载时就有：
+//     https://31cek.xyz/embed/kbj.php?url=<直链 mp4>&poster=<封面>
+//     url 参数就是真 mp4（hidden-kbj.onlyfanleaks.me/videos/*.mp4，
+//     2026-11-27 实测 200/206、真 video/mp4、无需 Referer）。
+//     Player 2 是 VOE 嵌入（io12379storege.xyz/e/<id>/），真实流地址
+//     藏在混淆 JS 里，静态提取不可靠，作为后备。
+//   封面：img 的 src 是绝对地址的 wp-content 图片；原始 HTML 里可能
+//     是懒加载占位（data-src/srcset），pickCover 会优先取真实地址。
 //
 // 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
 
@@ -194,8 +197,36 @@ async function getTracks(ext) {
 
 function findDirectMedia(html) {
   if (!html || typeof html !== 'string') return ''
-  const m = html.match(/https?:\/\/[^"'\s<>]+\.(?:m3u8|mp4)(?:\?[^"'\s<>]*)?/i)
-  if (m && m[0] && m[0].indexOf('preview') === -1) return m[0]
+  var re = /https?:\/\/[^"'\s<>]+\.(?:m3u8|mp4)(?:\?[^"'\s<>]*)?/gi
+  var m
+  while ((m = re.exec(html)) !== null) {
+    var u = m[0]
+    if (u.indexOf('preview') !== -1) continue
+    // 嵌入页地址本身不是媒体（如 31cek 嵌入串里的 mp4 参数会被整段匹配到），跳过
+    if (/31cek|kbj\.php|\/embed\//i.test(u)) continue
+    return u
+  }
+  return ''
+}
+
+// 从 31cek 嵌入地址里提取直链 mp4（2026-11-27 浏览器实测）：
+// 详情页加载时就有的播放器 iframe src 是
+//   https://31cek.xyz/embed/kbj.php?url=<直链 mp4>&poster=<封面>
+// url 参数就是真 mp4，实测 200/206、真 video/mp4，且不需要 Referer。
+function extractEmbedMp4(html) {
+  if (!html || typeof html !== 'string') return ''
+  var m = html.match(/31cek\.xyz\/embed\/kbj\.php\?url=([^&"'\s<>]+)/i)
+  if (m && m[1]) {
+    try { return decodeURIComponent(m[1]) } catch (e) { return m[1] }
+  }
+  // 兜底：页面里直接出现的 onlyfanleaks 直链
+  var d = html.match(/https?:\/\/hidden-kbj\.onlyfanleaks\.me\/videos\/[^"'\s<>]+\.mp4/i)
+  if (d && d[0]) return d[0]
+  // 通用：任何嵌入地址里经过编码的 url=<mp4> 参数
+  var g = html.match(/[?&]url=(https?%3A%2F%2F[^&"'\s<>]+\.mp4)/i)
+  if (g && g[1]) {
+    try { return decodeURIComponent(g[1]) } catch (e) { return g[1] }
+  }
   return ''
 }
 
@@ -225,7 +256,9 @@ async function getPlayinfo(ext) {
       finalMediaUrl = targetUrl
     } else if (targetUrl) {
       const html = await fetchHtml(targetUrl)
-      finalMediaUrl = findDirectMedia(html)
+      // 优先：31cek 嵌入里的 url 参数就是直链 mp4
+      finalMediaUrl = extractEmbedMp4(html)
+      if (!finalMediaUrl) finalMediaUrl = findDirectMedia(html)
       if (!finalMediaUrl) {
         const embedUrl = findEmbedUrl(html)
         if (embedUrl) {
