@@ -9,9 +9,11 @@
 //         /category/premium/ ，翻页 /category/<slug>/page/<n>/，首页翻页 /page/<n>/
 //   搜索：/?s=<关键词>
 //   详情：播放器是 <IFRAME SRC="https://sexkbj.top/embed/<id>">（VidHide 托管，
-//         直链 m3u8 经混淆 JS 动态生成，静态抓不到稳定地址）
-//   因此 getPlayinfo 先尽力从详情页和 embed 页里提取 m3u8/mp4 直链，
-//   提不到就返回空列表——这一点换写法也绕不过，取决于播放器能不能解析 VidHide。
+//         带签名的 master.m3u8 藏在一段 Dean Edwards 打包代码里，
+//         getPlayinfo 会现取 embed 页、解包、取出 hls2 的 master.m3u8 再交给播放器。
+//         签名有时效（约 36 小时），每次播放都要现取现解，不能写死。
+//         注意：这台服务器直接请求这条 m3u8 会返回 403（CDN 似乎按 IP/ASN 校验），
+//         电视上的家宽 IP 不一定一样，到底能不能播要在电视上实测。
 //
 // 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
 
@@ -105,6 +107,51 @@ function extractStreamUrl(text) {
     }
   }
   return ''
+}
+
+// VidHide embed 页的播放地址藏在一段 Dean Edwards 打包代码里：
+// eval(function(p,a,c,k,e,d){...}('...',36,603,'词|典'.split('|'),0,{}))
+// 打包后的原文里根本没有完整的 m3u8 地址，所以上面那个正则在 embed 页上
+// 永远匹配不到。把打包代码按字典一次还原，就能拿到 JWPlayer 的 links.hls2
+//（带签名的 master.m3u8，签名里有生成时间 s 和 36 小时有效期 e，
+// 每次播放都要现取现解，不能写死）。
+function unpackPackedJs(html) {
+  try {
+    const m = html.match(/\}\('((?:\\.|[^'\\])*)',(\d+),(\d+),'((?:\\.|[^'\\])*)'\.split\('\|'\)/)
+    if (!m) return ''
+    const p = m[1]
+    const a = parseInt(m[2], 10)
+    const c = parseInt(m[3], 10)
+    const k = m[4].split('|')
+    const d = {}
+    for (let i = 0; i < c; i++) d[i.toString(a)] = k[i] || i.toString(a)
+    // 一次性按词替换，避免还原出来的词被二次替换
+    return p.replace(/\b\w+\b/g, function (w) {
+      return Object.prototype.hasOwnProperty.call(d, w) ? d[w] : w
+    })
+  } catch (e) {
+    return ''
+  }
+}
+
+function extractM3u8FromEmbed(html) {
+  if (!html || typeof html !== 'string') return ''
+  const unpacked = unpackPackedJs(html)
+  if (!unpacked) return ''
+  // 优先取带签名的 master.m3u8（hls2）；hls3 是 master.txt，不作首选
+  const m = unpacked.match(/https?:\/\/[^\s"'<>]+?\.m3u8(?:[?#][^\s"'<>]*)?/)
+  return m ? m[0] : ''
+}
+
+async function fetchEmbedM3u8(embedUrl) {
+  const { data } = await $fetch.get(embedUrl, {
+    headers: {
+      'User-Agent': UA,
+      'Referer': 'https://sexkbj.com/',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    },
+  })
+  return extractM3u8FromEmbed(data)
 }
 
 async function getConfig() {
@@ -244,33 +291,48 @@ async function getPlayinfo(ext) {
   let targetUrl = ext.url
   let referer = ext.referer || 'https://sexkbj.com/'
   let finalMediaUrl = ''
+  let playReferer = referer
 
   try {
     if (isDirectMediaUrl(targetUrl)) {
       finalMediaUrl = targetUrl
     } else if (targetUrl) {
-      const { data } = await $fetch.get(targetUrl, {
-        headers: {
-          'User-Agent': UA,
-          'Referer': referer,
-        },
-      })
-
-      finalMediaUrl = extractStreamUrl(data)
-
-      if (!finalMediaUrl && typeof data === 'string') {
-        const $ = cheerio.load(data)
-        const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
-        const nextUrl = normalizeUrl(nextRaw, targetUrl)
-        if (nextUrl && nextUrl !== targetUrl) {
-          $print('检查内层 iframe: ' + nextUrl)
-          const subRes = await $fetch.get(nextUrl, {
-            headers: {
-              'User-Agent': UA,
-              'Referer': targetUrl,
-            },
-          })
-          finalMediaUrl = extractStreamUrl(subRes.data)
+      // 1) 目标就是 embed 页：直接解包取 m3u8
+      if (targetUrl.indexOf('/embed/') !== -1) {
+        finalMediaUrl = await fetchEmbedM3u8(targetUrl)
+        playReferer = targetUrl
+      }
+      // 2) 目标是详情页：先找 iframe，再解包 embed 页
+      if (!finalMediaUrl) {
+        const { data } = await $fetch.get(targetUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Referer': referer,
+          },
+        })
+        finalMediaUrl = extractStreamUrl(data)
+        if (!finalMediaUrl && typeof data === 'string') {
+          const $ = cheerio.load(data)
+          const nextRaw = $('iframe').first().attr('src') || $('iframe').first().attr('data-src') || ''
+          const nextUrl = normalizeUrl(nextRaw, targetUrl)
+          if (nextUrl && nextUrl !== targetUrl) {
+            $print('检查内层 iframe: ' + nextUrl)
+            playReferer = nextUrl
+            try {
+              finalMediaUrl = await fetchEmbedM3u8(nextUrl)
+            } catch (e) {
+              finalMediaUrl = ''
+            }
+            if (!finalMediaUrl) {
+              const subRes = await $fetch.get(nextUrl, {
+                headers: {
+                  'User-Agent': UA,
+                  'Referer': targetUrl,
+                },
+              })
+              finalMediaUrl = extractStreamUrl(subRes.data)
+            }
+          }
         }
       }
     }
@@ -278,7 +340,7 @@ async function getPlayinfo(ext) {
     if (finalMediaUrl) {
       $print('提取到直链: ' + finalMediaUrl)
     } else {
-      $print('未能从静态响应中提取到动态 m3u8/mp4 直链（该站流地址由前端播放器脚本动态生成）')
+      $print('未能提取到 m3u8 直链，返回空列表（播放会黑屏）')
     }
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
@@ -288,8 +350,8 @@ async function getPlayinfo(ext) {
     urls: finalMediaUrl ? [finalMediaUrl] : [],
     headers: [{
       'User-Agent': UA,
-      'Referer': 'https://sexkbj.com/',
-      'Origin': 'https://sexkbj.com',
+      'Referer': playReferer,
+      'Origin': 'https://sexkbj.top',
     }],
   })
 }
