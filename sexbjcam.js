@@ -1,6 +1,11 @@
 const cheerio = createCheerio()
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
+// 注意：2026-11-27 核查时 sexbjcam.com 在公开 DNS 里已无记录（NXDOMAIN），
+// 从这边和云端浏览器都打不开，无法对照真站验证。本文件沿用仓库原有结构，
+// 另补了与 sexkbj2.js 相同的两处播放修正：解包 VidHide 风格打包代码取 m3u8、
+// 找不到直链时返回空列表而不是播放页地址。若域名恢复，可直接用。
+
 const appConfig = {
   ver: 1,
   title: 'SexBJCam',
@@ -159,14 +164,48 @@ async function getTracks(ext) {
   })
 }
 
+// VidHide 风格的打包播放代码（sexkbj.com 同款问题）：m3u8 藏在
+// eval(function(p,a,c,k,e,d){...}('...',36,603,'词|典'.split('|'),0,{}))
+// 里，原文里没有完整地址，正则搜不到。按字典一次还原再取 m3u8。
+function unpackPackedJs(html) {
+  try {
+    const m = html.match(/\}\('((?:\\.|[^'\\])*)',(\d+),(\d+),'((?:\\.|[^'\\])*)'\.split\('\|'\)/)
+    if (!m) return ''
+    const p = m[1]
+    const a = parseInt(m[2], 10)
+    const c = parseInt(m[3], 10)
+    const k = m[4].split('|')
+    const d = {}
+    for (let i = 0; i < c; i++) d[i.toString(a)] = k[i] || i.toString(a)
+    return p.replace(/\b\w+\b/g, function (w) {
+      return Object.prototype.hasOwnProperty.call(d, w) ? d[w] : w
+    })
+  } catch (e) {
+    return ''
+  }
+}
+
+function extractM3u8FromPacked(html) {
+  if (!html || typeof html !== 'string') return ''
+  const unpacked = unpackPackedJs(html)
+  if (!unpacked) return ''
+  const m = unpacked.match(/https?:\/\/[^\s"'<>]+?\.m3u8(?:[?#][^\s"'<>]*)?/)
+  return m ? m[0] : ''
+}
+
 async function getPlayinfo(ext) {
   ext = argsify(ext)
   let targetUrl = ext.url
   let referer = ext.referer || (appConfig.site + '/')
-  let finalUrl = targetUrl
+  let finalUrl = ''
   let effectiveReferer = referer
 
   try {
+    if (targetUrl && /\.(m3u8|mp4)(\?|#|$)/i.test(targetUrl)) {
+      // 目标本身就是直链
+      finalUrl = targetUrl
+      effectiveReferer = referer
+    } else {
     const res = await $fetch.get(targetUrl, {
       headers: {
         'User-Agent': UA,
@@ -199,6 +238,12 @@ async function getPlayinfo(ext) {
       // 切片与播放清单通常校验播放器页面（即 targetUrl）作为 Referer
       effectiveReferer = targetUrl
     } else {
+      // 先试解包（VidHide 风格的打包代码，m3u8 藏在字典里）
+      const unpackedM3u8 = extractM3u8FromPacked(cleanText)
+      if (unpackedM3u8) {
+        finalUrl = unpackedM3u8
+        effectiveReferer = targetUrl
+      } else {
       // 如果没直接拿到 m3u8，看看 iframe 内部是否还嵌套了第二层 iframe
       const nestedMatch = cleanText.match(/<iframe[^>]+(?:src|data-src)=["']([^"']+)["']/i)
       if (nestedMatch && nestedMatch[1]) {
@@ -221,9 +266,17 @@ async function getPlayinfo(ext) {
         if (subPicked) {
           finalUrl = subPicked
           effectiveReferer = nestedUrl
+        } else {
+          const subUnpacked = extractM3u8FromPacked(subClean)
+          if (subUnpacked) {
+            finalUrl = subUnpacked
+            effectiveReferer = nestedUrl
+          }
         }
       }
+      }
     }
+    } // else: 目标不是直链，上面已处理
   } catch (e) {
     $print('getPlayinfo 错误: ' + e)
   }
@@ -243,7 +296,8 @@ async function getPlayinfo(ext) {
   }
 
   return jsonify({
-    urls: [finalUrl],
+    // 找不到直链就返回空列表，不要把播放页地址当成视频地址返回（会黑屏）
+    urls: finalUrl ? [finalUrl] : [],
     headers: [headerObj],
   })
 }
@@ -290,3 +344,4 @@ async function search(ext) {
 
   return jsonify({ list: cards })
 }
+
