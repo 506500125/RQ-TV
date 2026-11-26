@@ -189,6 +189,21 @@ function finalUrlFromResponse(res) {
   return ''
 }
 
+// 把可能是相对地址的 Location 解析成绝对地址
+function resolveLocation(base, loc) {
+  if (!loc) return ''
+  var l = String(loc).trim()
+  if (!l) return ''
+  if (l.indexOf('http://') === 0 || l.indexOf('https://') === 0) return l
+  if (l.indexOf('//') === 0) return 'https:' + l
+  var m = String(base).match(/^(https?:\/\/[^\/]+)/)
+  var origin = m ? m[1] : ''
+  if (l.charAt(0) === '/') return origin + l
+  var b = String(base).split('?')[0]
+  var slash = b.lastIndexOf('/')
+  return (slash > 0 ? b.slice(0, slash + 1) : origin + '/') + l
+}
+
 async function resolveGofileRedirect(url, referer) {
   if (!url || url.indexOf('gofile.io') === -1) return url
   var headers = {
@@ -196,28 +211,63 @@ async function resolveGofileRedirect(url, referer) {
     'Referer': referer,
     'Range': 'bytes=0-0',
   }
-  // 1) 尽量不跟随跳转，直接读 302 的 Location。XPTV 的 $fetch 若支持
-  //    redirect:'manual'，这里就能拿到最终地址；不支持时也无害。
-  //    注意：跳转目标每个文件都不一样（实测有 file-na-chi-1，也有
-  //    file-eu-par-1），不能靠猜主机名，必须真拿到 Location。
-  try {
-    var res1 = await $fetch.get(url, { headers: headers, redirect: 'manual' })
-    var loc1 = pickHeader(res1 && res1.headers, 'location')
-    if (loc1 && loc1.indexOf('http') === 0 && loc1 !== url) return loc1
-    var fin1 = finalUrlFromResponse(res1)
-    if (fin1 && fin1 !== url) return fin1
-  } catch (e) {}
-  // 2) 跟随一次跳转，从响应对象里找最终地址
+  // gofile 跳转目标每个文件都不一样（实测有 file-na-chi-1、file-eu-par-1，
+  // 还有 store-na-phx-4、store-eu-par-6、store10 等中间站），不能靠猜
+  // 主机名，必须一跳一跳真拿到 Location。循环最多 5 跳：每跳都尽量
+  // 不跟随跳转、直接读 302 的 Location；某跳无 Location 说明已直出，
+  // 该跳地址就是最终地址。
+  var current = url
+  for (var hop = 0; hop < 5; hop++) {
+    var loc = ''
+    // a) 标准 fetch（若运行环境提供）
+    try {
+      if (typeof fetch === 'function') {
+        var fr = await fetch(current, { method: 'GET', headers: headers, redirect: 'manual' })
+        if (fr && fr.headers) {
+          if (typeof fr.headers.get === 'function') loc = fr.headers.get('location') || fr.headers.get('Location') || ''
+          else loc = pickHeader(fr.headers, 'location')
+        }
+        if (!loc && fr && fr.url && String(fr.url).indexOf('http') === 0 && fr.url !== current) return String(fr.url)
+      }
+    } catch (e) {}
+    // b) $fetch 不跟随跳转
+    if (!loc) {
+      try {
+        var res = await $fetch.get(current, { headers: headers, redirect: 'manual' })
+        loc = pickHeader(res && res.headers, 'location')
+        if (!loc) {
+          var fin = finalUrlFromResponse(res)
+          if (fin && fin !== current) return fin
+        }
+      } catch (e) {
+        try {
+          loc = pickHeader(e && e.response && e.response.headers, 'location')
+        } catch (_) {}
+      }
+    }
+    if (!loc) break
+    var next = resolveLocation(current, loc)
+    if (!next || next === current) break
+    current = next
+  }
+  if (current !== url) return current
+  // 跟随一次跳转，从响应对象里找最终地址（旧兜底）
   try {
     var res2 = await $fetch.get(url, { headers: headers })
     var fin2 = finalUrlFromResponse(res2)
     if (fin2 && fin2 !== url) return fin2
     var loc2 = pickHeader(res2 && res2.headers, 'location')
-    if (loc2 && loc2.indexOf('http') === 0 && loc2 !== url) return loc2
+    if (loc2) {
+      var n2 = resolveLocation(url, loc2)
+      if (n2 && n2 !== url) return n2
+    }
   } catch (e) {
     try {
       var loc3 = pickHeader(e && e.response && e.response.headers, 'location')
-      if (loc3 && loc3.indexOf('http') === 0 && loc3 !== url) return loc3
+      if (loc3) {
+        var n3 = resolveLocation(url, loc3)
+        if (n3 && n3 !== url) return n3
+      }
     } catch (_) {}
   }
   return url
