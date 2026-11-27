@@ -227,6 +227,9 @@ function extractEmbedMp4(html) {
   if (g && g[1]) {
     try { return decodeURIComponent(g[1]) } catch (e) { return g[1] }
   }
+  // 通用：任何嵌入地址里明文的 url=<mp4> 参数（非 31cek 的嵌入页也可能这样传直链）
+  var p = html.match(/[?&]url=(https?:\/\/[^&"'\s<>]+\.mp4)/i)
+  if (p && p[1]) return p[1]
   return ''
 }
 

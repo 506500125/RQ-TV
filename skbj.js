@@ -96,7 +96,39 @@ function buildCostMap(html) {
   return map
 }
 
-function parseCards($, costMap) {
+// 从列表/搜索页的服务端数据（RSC payload）里按 slug 建封面表。
+// 每个视频对象里都有 coverUrl（绝对地址，hentaiworld.b-cdn.net）。
+// 列表里 16/24 的卡片 img 的 src 是 data:image/svg 占位图、且
+// data-deferred-thumbnail 为空，真实封面只在 RSC 数据里，不从 img
+// 上拿。返回 { slug: coverUrl }；拿不到时返回空表，调用方用 img 兜底。
+function buildCoverMap(html) {
+  var map = {}
+  if (!html) return map
+  var re = /slug:"([A-Za-z0-9\-_]+)"[\s\S]{0,800}?coverUrl:"([^"]+)"/g
+  var m
+  while ((m = re.exec(html)) !== null) {
+    if (m[2] && m[2].indexOf('http') === 0) map[m[1]] = m[2]
+  }
+  return map
+}
+
+// 封面优先级：img 的真实 src（非占位图）> RSC 的 coverUrl >
+// srcSet 第一项 > data-src；占位图（data: 或含 placeholder）不算。
+function pickCardCover(img, rscCover) {
+  var src = img ? String(img.attr('src') || '').trim() : ''
+  if (src && src.indexOf('data:') !== 0 && src.indexOf('placeholder') === -1) return src
+  if (rscCover) return rscCover
+  var ss = img ? (img.attr('srcSet') || img.attr('srcset') || img.attr('data-srcset') || '') : ''
+  if (ss) {
+    var first = String(ss).split(',')[0].trim().split(/\s+/)[0]
+    if (first && first.indexOf('http') === 0) return first
+  }
+  var ds = img ? (img.attr('data-src') || img.attr('data-lazy-src') || '') : ''
+  if (ds && ds.indexOf('http') === 0) return ds
+  return ''
+}
+
+function parseCards($, costMap, coverMap) {
   const cards = []
   const seen = {}
   $('a[href^="/videos/"]').each((_, el) => {
@@ -112,7 +144,7 @@ function parseCards($, costMap) {
     const info = (costMap && costMap[slug]) || null
     if (info && (info.cost > 0 || info.premium)) return
     const img = a.find('img').first()
-    let cover = img.attr('src') || ''
+    let cover = pickCardCover(img, (coverMap && coverMap[slug]) || '')
     // 时长在缩略图右下角的徽标里
     let duration = ''
     a.find('.aspect-video span').each((_, sp) => {
@@ -153,7 +185,7 @@ async function getCards(ext) {
     })
     const html = typeof data === 'string' ? data : JSON.stringify(data || '')
     const $ = cheerio.load(html)
-    cards = parseCards($, buildCostMap(html))
+    cards = parseCards($, buildCostMap(html), buildCoverMap(html))
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
@@ -374,7 +406,7 @@ async function search(ext) {
     })
     const html = typeof data === 'string' ? data : JSON.stringify(data || '')
     const $ = cheerio.load(html)
-    cards = parseCards($, buildCostMap(html))
+    cards = parseCards($, buildCostMap(html), buildCoverMap(html))
   } catch (e) {
     $print('search 错误: ' + e)
   }
