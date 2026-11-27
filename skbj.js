@@ -15,7 +15,13 @@
 //     地址连同 Referer（详情页地址）一起返回。最终地址加详情页 Referer
 //     实测 206、真 mp4 数据。
 //   列表页看不出是否收费，点播收费视频返回空列表（XPTV 会提示无法播放，
-//   而不是黑屏）。
+//   而不是黑屏）。2026-11-27 修正：列表页其实自带价格——服务端数据
+//   （RSC payload）里每个视频都有 creditCost / isPremium，顺序与卡片
+//   一致，且 coverUrl 里带视频 slug，可按 slug 对上号。所以 getCards /
+//   search 直接在列表里过滤掉收费的，只留免费的。
+//   实例：pse0210 BJ차도하 2026-11-11，creditCost 28、videoUrl:null、
+//   creditLocked:true，站里根本没给免费直链，播不了是收费不是 bug。
+//   最新第 1 页实测 24 个里只有 2 个免费。
 //
 // 依赖：运行环境提供的 createCheerio()、$fetch、jsonify、argsify、$print。
 
@@ -73,7 +79,24 @@ async function getConfig() {
   return jsonify(appConfig)
 }
 
-function parseCards($) {
+// 从列表/搜索页的服务端数据（RSC payload）里按 slug 建价格表。
+// 每个视频对象形如：
+//   coverUrl:".../videos-media/<slug>/thumb-xxx.webp",previewVideoUrl:"...",
+//   durationSeconds:140,...,creditCost:128,isPremium:!1
+// 返回 { slug: { cost, premium } }。拿不到价格信息时返回空表，调用方
+// 保留全部卡片（宁可多显示，不可误删）。
+function buildCostMap(html) {
+  var map = {}
+  if (!html) return map
+  var re = /videos-media\/([A-Za-z0-9\-_]+)\/[^"]*"[\s\S]{0,600}?creditCost:(\d+),isPremium:(!0|!1)/g
+  var m
+  while ((m = re.exec(html)) !== null) {
+    map[m[1]] = { cost: parseInt(m[2], 10) || 0, premium: m[3] === '!0' }
+  }
+  return map
+}
+
+function parseCards($, costMap) {
   const cards = []
   const seen = {}
   $('a[href^="/videos/"]').each((_, el) => {
@@ -83,6 +106,11 @@ function parseCards($) {
     const title = (a.find('h2').first().text().trim() || a.find('h3').first().text().trim())
     if (!title) return
     seen[href] = true
+    // 收费视频（creditCost>0 或 isPremium）在列表里直接藏掉，播不了
+    // 的不显示；价格表里没这个 slug 时保留。
+    const slug = href.replace(/^\/videos\//, '').replace(/\/$/, '')
+    const info = (costMap && costMap[slug]) || null
+    if (info && (info.cost > 0 || info.premium)) return
     const img = a.find('img').first()
     let cover = img.attr('src') || ''
     // 时长在缩略图右下角的徽标里
@@ -125,7 +153,7 @@ async function getCards(ext) {
     })
     const html = typeof data === 'string' ? data : JSON.stringify(data || '')
     const $ = cheerio.load(html)
-    cards = parseCards($)
+    cards = parseCards($, buildCostMap(html))
     $print('抓到视频数量: ' + cards.length)
   } catch (e) {
     $print('getCards 错误: ' + e)
@@ -346,7 +374,7 @@ async function search(ext) {
     })
     const html = typeof data === 'string' ? data : JSON.stringify(data || '')
     const $ = cheerio.load(html)
-    cards = parseCards($)
+    cards = parseCards($, buildCostMap(html))
   } catch (e) {
     $print('search 错误: ' + e)
   }
